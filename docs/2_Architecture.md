@@ -57,7 +57,7 @@ Guards: **`T_in ≤ 0.85 * C_in`** and **`T_out ≤ 0.95 * C_out`**
 
 * Shrink prompt size (~ 40 % under raw JSON-Schema).  
 * Leverage BAML runtime’s **auto-repair** for minor JSON glitches.  
-* Inject two hidden fields in every object:
+* Inject two hidden fields in every object or only required fields:
 
 ```baml
 confidence: float @hidden      # model self-score 0-100
