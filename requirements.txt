@@ -3,3 +3,4 @@ jsonschema
 tiktoken
 google-generativeai
 PyMuPDF
+openai

@@ -36,16 +36,18 @@ Guards: **`T_in ≤ 0.85 * C_in`** and **`T_out ≤ 0.95 * C_out`**
 
 ## 2️⃣ Data-flow in prose ([Overview diagram](docs/1_Overview.md#self-contained-architecture-diagram-🏗️))
 
-| #     | Module                      | Why it exists                                                                        | Outputs                               |
-| ----- | --------------------------- | ------------------------------------------------------------------------------------ | ------------------------------------- |
-| **1** | _Raw input loader_          | Normalises file → {bytes, mime, size}.                                               | `DocHandle`                           |
-| **2** | _JSON Schema→BAML compiler_ | Turn verbose JSON-Schema into compact BAML schema & inject safety fields.            | `schema.baml`, `schema_tok`           |
-| **3** | _Token-aware planner_       | Picks model tier, decides chunk boundaries, prevents running out of `output tokens`. | list[`PlanChunk`]                     |
-| **4** | _Chunker_                   | Materialises string/page/row ranges per chunk.                                       | list[`Chunk`] with `text` or `images` |
-| **5** | _Extract + Validate loop_   | One LLM call per chunk; attaches confidence & error paths.                           | list[`PartialJSON`]                   |
-| **6** | _Human queue_               | NDJSON log for duplicates, low-confidence, schema fails to be resolved by humans.    | `conflicts.ndjson`                    |
-| **7** | _Merger_                    | Stitch partials; never overwrite without review.                                     | `master.json`                         |
-| **8** | _Final validator_           | Last `jsonschema.validate`; 0 errors → deliver.                                      | Success / Fail                        |
+| # | Module | Why it exists | Outputs |
+|---|---------|--------------|---------|
+| **1** | _Raw input loader_ | Normalises file → {bytes, mime, size}. | `DocHandle` |
+| **2** | _JSON-Schema → BAML compiler_ | Shrinks verbose schema, injects safety fields. | `schema.baml`, `schema_tok` |
+| **3** | _Token-aware planner_ | • Counts tokens (schema + doc)<br>• Finds every **array path**, probes row counts<br>• Chooses model tier via `enable_max_mode`<br>• Emits **ExtractionTask** list (chunk or slice). | list[`ExtractionTask`] |
+| **4** | _Chunker_ | Creates semantic string/page/row ranges per chunk when **input** > ctx-window. | list[`Chunk`] |
+| **5** | _Extract + Validate (+ Stream)_ | Executes each task:<br> • one-shot for normal arrays<br> • **slice loop** for streamed arrays.<br>Attaches confidence & error paths. | list[`PartialJSON`] |
+| **6** | _Human queue_ | NDJSON log – scalar conflicts, low-confidence, unrepaired schema fails. Includes `source_ptr`. | `conflicts.ndjson` |
+| **7** | _Merger_ | Concats array slices, checks final length; first-write-wins for scalars, logs conflicts. | `master.json` |
+| **8** | _Final validator_ | Final `jsonschema.validate`; 0 errors → deliver. | Success / Fail |
+
+> **Chunking vs Streaming** – chunker protects *input* context; planner/streamer protect *output* token cap.
 
 ---
 
@@ -53,86 +55,137 @@ Guards: **`T_in ≤ 0.85 * C_in`** and **`T_out ≤ 0.95 * C_out`**
 
 ### 3.1 Purpose
 
-- Minimise prompt size (~40 % smaller than raw schema).
-- Allow BAML runtime to **auto-repair** minor JSON glitches.
-- Inject **two synthetic fields** into every _object_ class:
+* Shrink prompt size (~ 40 % under raw JSON-Schema).  
+* Leverage BAML runtime’s **auto-repair** for minor JSON glitches.  
+* Inject two hidden fields in every object:
 
 ```baml
-  confidence: float @hidden      # model self-score 0-100
-  unsure?: "not sure"            # sentinel enum entry to mitigate hallucination or schema violations
+confidence: float @hidden      # model self-score 0-100
+unsure?:    "not sure"         # sentinel to avoid hallucinated values
 ```
 
-### 3.2 Algorithm
+### 3.2 Coverage and Algorithm
 
-Will build on top of this [JSON schema to BAML compiler](https://github.com/BoundaryML/baml-examples/tree/main/json-schema-to-baml)
-
-Currently doesn't cover all the features of JSON schema such as `if_then_else`, `anyOf`, `oneOf`, `regex` etc.
+- Builds on Boundary’s reference converter
+https://github.com/BoundaryML/baml-examples/tree/main/json-schema-to-baml.
+- Extended support added for: `oneOf`, `anyOf`, `if/then/else`,
+`patternProperties`, `top-level regex constraints`.
+*Fallback: embed the offending sub-schema verbatim when conversion impossible as a @description.*
+- Adds “slice-safe arrays” annotation (BAML comment) so extractor can
+supply start_index/limit without violating type rules.
+Reference: Boundary docs Streaming guide
+https://docs.boundaryml.com/guide/baml-basics/streaming — TBD 
 
 ---
 
 ## 4️⃣ Token-Aware Planner (Module #3)
 
-### 4.0 Why Chunking in the first place?
+### 4.0 Objectives
 
-- If JSON schema runs upto 150k as mentioned in the assgn, then we'll run out of output tokens if a big document is passed to the system or if there are arrays in the schema.
-- Preventing single point of failure. If a chunk fails, we can still extract the rest of the document and retry the failed chunk.
+* guarantee **no input overflow** (⇢ semantic chunking) **and no output overflow**  
+  (⇢ per-array **stream slicing**);
+* pick the cheapest tier that fits, honouring `enable_max_mode`;
+* emit a flat list of **ExtractionTask** records so the extractor can run
+  fully async;
+* be the single home of all token arithmetic and “how many LLM calls?”
 
-### 4.1 Why a separate planner?
+---
 
-1. Context & output limits differ by model/vendor → we must compute both.
-2. Splitting logic (pages vs. semantic text vs. rows) is doc-type-specific; isolating planner keeps extractor simple.
-3. Planner can later grow cost-based model selection (Flash → Pro) without touching chunkers.
+### 4.1 Responsibilities
 
-### 4.2 Responsibilities
+| Task | Explanation |
+|------|-------------|
+| **Token counting** | `schema_tok` via BAML size, `doc_tok` via tiktoken (OpenAI) or `models.countTokens` (Gemini). |
+| **Section enumeration** | Vision → ToC-LLM, Text → LLM based semantic splitter or [semantic chunker](https://docs.llamaindex.ai/en/stable/examples/node_parsers/semantic_chunking/), CSV → header + first-50 rows. |
+| **Array probes** | For **each array path** found in the schema, run one cheap LLM to estimate count of the array items(`len(array)`). → `est_len[path]`. |
+| **Cost / item** | From schema leaf: numbers = 1 tok, enum = 1 tok, strings ≈ `maxLength / chars_per_tok`, then cached per model family. |
+| **Expected-tokens calc** | `sum(cost[path] × est_len[path]) + scalar_meta` → used for tier feasibility & composite score. |
+| **Composite complexity score** | `1.0·log2(nodes)+0.6·depth+0.2·enums+0.5·arrays·avgLen+1.0·log2(expectedTok)` (see §4.2). |
+| **Tier selection** | Two tier sets:<br> • *normal* = {mini, flash}<br> • *max* = {full, pro}.<br>`enable_max_mode` toggles the set. |
+| **Chunk decision** | If `schema_tok + doc_tok > 0.85·C_in` ⇒ build semantic chunks. |
+| **Stream decision** | For every array, if `item_cost × est_len > 0.9·tier.max_out` ⇒ mark **stream** & compute `slice_len`. |
+| **Task graph output** | Emit `ExtractionTask(chunk_id, path, start, limit, model)`; normal arrays ⇒ one task; streamed arrays ⇒ N slice tasks. |
+| **Rows-per-chunk (CSV)** | `rows_cap = floor(0.8 · C_out / avg_row_tok)` (see §4.6). |
 
-| Task                         | Explanation                                                                                                                                                                                                                                                                                                                                                                          |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Token counting**           | `schema_tok = tiktoken.count()` (OpenAI) or `models.countTokens(schema)` (Gemini)                                                                                                                                                                                                                                                                                                    |
-| **Section enumeration**      | Vision: run TOC-LLM to generate a table of contents and split the pages into sections(this is done to ensure cross-page context is maintained while extracting); Text: run splitter-LLM to split the text into sections based on semantic boundaries([semantic chunker](https://docs.llamaindex.ai/en/stable/examples/node_parsers/semantic_chunking/)); CSV: read header + 50 rows. |
-| **Guard #1**                 | Keep prompt ≤ 85 % `C_in` to allow for mis-counts or variable tokenization.                                                                                                                                                                                                                                                                                                          |
-| **Guard #2**                 | Ensure expected JSON ≤ 95 % `C_out`.                                                                                                                                                                                                                                                                                                                                                 |
-| **Array-explosion estimate** | Ask small LLM: “How many `<array_field>` items present?”; multiply by item token size.                                                                                                                                                                                                                                                                                               |
-| **Rows-per-chunk (CSV)**     | `rows_cap = floor(0.8 * C_out / (avg_cell_tok * n_cols))`                                                                                                                                                                                                                                                                                                                            |
+---
 
-> Note:  
-> Array-explosion: A JSON schema can have an array field like "line_items":  
-> { "type":"array", "items":{…} }.  
-> Input doc may list 5 000 items ⇒ output easily 200 k tokens though the doc text is short.  
-> Planner therefore estimates array length first to pick model or chunk.
+### 4.2 Composite complexity score
 
-### 4.3 End-to-end algorithm
-
+Used only for analytics & future cost models—not for hard routing.
 ```python
-def plan_document(doc: DocHandle, schema_tok: int) -> list[PlanChunk]:
-    """
-    Decide model tier + chunk boundaries.
-    Returns empty list when no chunking required.
-    """
-    caps = choose_model(schema_tok, doc.size)        # GPT-4.1 vs Gemini
-    doc_tok = count_tokens(doc)                      # whole file first!
-
-    # ── Fast path: fits in one shot ───────────────────────────────
-    if (schema_tok + doc_tok) <= 0.85 * caps.C_in:
-        exp_out = estimate_output(doc)               # scalar + arrays
-        if exp_out <= 0.95 * caps.C_out:
-            return [PlanChunk(doc_range=doc.all(), model=caps.name)]
-
-    # ── Slow path: need chunking ─────────────────────────────────
-    sections = enumerate_sections(doc)               # Vision TOC or Text splitter
-    chunks: list[PlanChunk] = []
-    cur: list[Section] = []; cur_tok = 0
-
-    for sec in sections:
-        if schema_tok + cur_tok + sec.tok > 0.85 * caps.C_in:
-            chunks.append(PlanChunk(cur, caps.name))
-            cur, cur_tok = [], 0
-        cur.append(sec); cur_tok += sec.tok
-
-    if cur: chunks.append(PlanChunk(cur, caps.name))
-    return chunks
+complexity =
+1.0 * log2(schema_nodes) +
+0.6 * max_nesting_depth +
+0.2 * enum_literals +
+0.5 * array_fields * avg(est_len) +
+1.0 * log2(expected_json_tokens)
 ```
 
-### 4.4 CSV row sizing (updated)
+---
+
+### 4.3 Tier & mode selection logic
+
+```text
+if enable_max_mode:
+    tiers = [full (32,768), pro (65,536)]
+else:
+    tiers = [mini (32,768), flash (65,536)]
+
+tier = first tier where expected_json_tokens ≤ 0.9·tier.max_out
+if no tier fits → mark arrays that overflow for streaming
+```
+- full - gpt-4.1
+- mini - gpt-4.1-mini
+- pro - gemini-2.5-pro
+- flash - gemini-2.5-flash
+
+### 4.4 ExtractionTask data structure
+```python
+ExtractionTask = TypedDict(
+    chunk_id   = int,              # 0 if no chunking
+    path       = str,              # "invoice.line_items"
+    start      = int,              # row offset in array
+    limit      = int,              # number of rows to emit
+    model_name = str               # "mini" | "flash" | "pro" | "full"
+)
+```
+
+*Example output for a 2400-row invoice with streaming enabled*
+```json
+[
+    {"chunk_id":0,"path":"invoice.line_items","start":0,"limit":1474,"model":"pro"},  // 1474 rows
+    {"chunk_id":0,"path":"invoice.line_items","start":1474,"limit":926,"model":"pro"}, // 926 rows
+    {"chunk_id":0,"path":"invoice.comments","start":0,"limit":117,"model":"pro"},     // 117 rows
+    {"chunk_id":0,"path":"invoice.comments","start":117,"limit":183,"model":"pro"}    // 183 rows
+]
+```
+
+### 4.5 Planner pseudocode
+
+```python
+def build_plan(doc: DocHandle, schema: dict, enable_max: bool) -> list[ExtractionTask]:
+    arrays = find_array_paths(schema)                 # [(path, leaf_schema), …]
+    est_len = {p: probe_len(doc.text, p) for p,_ in arrays}
+    item_cost = {p: tokens_per_item(leaf, "openai") for p,leaf in arrays}
+    exp_tok   = sum(item_cost[p]*est_len[p] for p in arrays) + 128  # scalars
+
+    tier = choose_tier(exp_tok, enable_max)           # may return None if no tier fits
+    tasks = []
+
+    # decide chunks (input guard)
+    for chunk_id, chunk in enumerate(semantic_chunks(doc, schema_tok=tiktoken.count(schema))):
+        for p in arrays:
+            max_out = (MAX_OUT[tier] if tier else 32768) * 0.9
+            slice_len = max_out // item_cost[p]
+            if slice_len >= est_len[p]:               # full array one-shot
+                tasks.append(Task(chunk_id,p,0,est_len[p], tier or "flash"))
+            else:                                     # array streaming
+                for s in range(0, est_len[p], slice_len):
+                    tasks.append(Task(chunk_id,p,s,slice_len, tier or "flash"))
+    return tasks
+```
+
+### 4.4 CSV row sizing
 
 ```python
 avg_row_tok = count_tokens(csv.first_n_rows(50)) / 50
@@ -144,6 +197,9 @@ _Why? Averaging over full rows captures delimiter overhead and numeric cell dens
 ---
 
 ## 5️⃣ Chunkers (Module #4)
+
+> **avoid `input context overflow`** by producing semantically-aligned pieces.  
+> `Output-overflow` is now handled by the planner’s **array-streaming** path (§4).
 
 ### 5.1 Vision ToC-LLM splitter
 
@@ -227,36 +283,47 @@ for i in range(0, len(rows), rows_cap):
 
 ---
 
-## 6️⃣ Extract + Validate (Module #5)
+## 6️⃣ Extract + Validate (+ Stream) (Module #5)
 
-### 6.1 End-to-end flow per chunk
+### 6.1 Execution loop (task-driven)
 
 ```python
-async def extract_validate(chunk: Chunk, schema_baml: str, caps: ModelCaps):
+async def run_tasks(tasks: list[ExtractionTask], schema_baml: str):
     """
-    Returns PartialJSON(record), raw_conf, lib_conf, final_conf, fail_paths
+    Executes ExtractionTask objects emitted by the planner.
+    Yields PartialJSON slices; merger handles assembly.
     """
-    # 1) Build prompt
-    prompt = build_baml_prompt(schema_baml, chunk.content)
+    async def _call(task: ExtractionTask):
+        prompt = build_baml_prompt(
+            schema_baml,
+            chunk_text=task.chunk.text,
+            path=task.path,
+            start_index=task.start,
+            limit=task.limit
+        )
+        llm_resp = await llm_generate(
+            model=task.model_name,
+            prompt=prompt,
+            max_tokens=int(0.95 * MAX_OUT[task.model_name])
+        )
+        obj, _ = baml.parse(llm_resp)          # auto-repair inside
+        fail = [e.relative_path for e in validator.iter_errors(obj)]
+        return PartialJSON(
+            obj=obj,
+            source_ptr=f"{task.chunk.src}#slice={task.start}/{task.limit}",
+            fail_paths=fail,
+        )
 
-    # 2) Call LLM (async)
-    llm_resp = await llm_generate(prompt, max_tokens=int(0.95 * caps.C_out))
-
-    # 3) BAML parses & auto-repairs
-    obj, _ = baml_runtime.parse(llm_resp)        # _ = parse_conf not used
-
-    # 4) Schema validation
-    fail_paths = [e.relative_path for e in validator.iter_errors(obj)]
-    lib_conf   = 1.0 if not fail_paths else 0.0  # deterministic
-
-    # 5) Self-confidence from the model (may be inflated)
-    raw_conf = obj.pop("confidence", 0.5)        # 0–1 range by prompt instruction
-    return PartialJSON(obj, raw_conf, lib_conf, fail_paths)
+    # run all tasks concurrently
+    return await asyncio.gather(*[_call(t) for t in tasks])
 ```
+*BAML prompt stub (`build_baml_prompt`) injects four parameters: `doc`, `path`, `start_index`, `limit`.*
+
+This mirrors the Streaming example in Boundary docs (TBD → hands-on validation).
 
 ### 6.2 Percentile scaling and final score
 
-After all chunks finish we normalise the set
+After all chunks/tasks finish we normalise the set
 `{raw_conf_i} → raw_conf_scaled_i` via percentile mapping so that:
 
 - lowest raw_conf → 0
@@ -301,14 +368,54 @@ If fail_paths is non-empty the record is auto-queued for Human review
 
 Humans intervene only where automation could silently corrupt data.
 
-- **Why NDJSON?** Append-only log, grep-able, easy to load into Excel/Airtable.
-- **When is a record queued?**
+### 7.1 Merge rules
+```python
+def merge(master, partial, ptr):
+    # arrays → append slice
+    for path, slice_ in partial.get_arrays():
+        arr = master.setdefault(path, [])
+        arr.extend(slice_)
+    # scalars → first-write wins, log conflicts and send to human
+    for path, val in partial.get_scalars():
+        if path not in master:
+            master[path] = val
+        elif master[path] != val:
+            log_conflict({
+                "json_path": path,
+                "existing": master[path],
+                "incoming": val,
+                "source_ptr_existing": ptr_existing[path],
+                "source_ptr_incoming": partial.source_ptr,
+            })
+```
 
-| Trigger                                    | Reason                                  |
-| ------------------------------------------ | --------------------------------------- |
-| confidence < threshold(0.5 for now)        | Model uncertain or schema fail penalty. |
-| duplicate ptr, different value             | Need business decision.                 |
-| `jsonschema` violation not auto-repairable | Model couldn’t satisfy schema.          |
+After final slice arrives the merger asserts:
+
+```python
+assert len(master["invoice"]["line_items"]) == planner_est["invoice.line_items"]
+```
+
+### 7.2 Human-queue record format
+```json
+{
+  "json_path": "invoice.vendor",
+  "existing": "ACME",
+  "incoming": "ACE",
+  "source_ptr_existing": "pdf#page=3",
+  "source_ptr_incoming": "pdf#page=7",
+  "reason": "scalar_conflict"
+}
+```
+
+### 7.3 Queue triggers
+| Trigger                    | Reason                                                       |
+| -------------------------- | ------------------------------------------------------------ |
+| `confidence < 0.5`         | Model self-doubt.                                            |
+| scalar conflict            | Business decision required.                                  |
+| unrepaired schema fail     | Deterministic validation error.                              |
+| **slice\_count\_mismatch** | Final array shorter/longer than probe (streaming integrity). |
+
+*Queue stored as append-only NDJSON; source_ptr gives reviewers a deep link.*
 
 ---
 
@@ -317,16 +424,39 @@ Humans intervene only where automation could silently corrupt data.
 ### 8.1 Merge algorithm
 
 ```python
-for ptr, val in walk_json(partial.data):
-    if ptr not in master:
-        master[ptr] = val                   # first arrival wins
-    elif master[ptr] != val:
-        log_conflict(ptr, master[ptr], val) # sent to human
-
-# arrays - append
-for arr_ptr, slice_ in partial.get_arrays():
-    master.setdefault(arr_ptr, []).extend(slice_)
+def merge(master, partial):
+    # ── 1. Scalars ──────
+    for ptr, val in partial.get_scalars():
+        if ptr not in master:
+            master[ptr] = val
+        elif master[ptr] != val:  # conflict
+            log_conflict({
+               "json_path": ptr,
+               "existing": master[ptr],
+               "incoming": val,
+               "source_ptr_existing": src_map[ptr],
+               "source_ptr_incoming": partial.source_ptr
+            })
+    # ── 2. Arrays (slice streaming) ──────
+    for ptr, slice_ in partial.get_arrays():
+        master.setdefault(ptr, []).extend(slice_)
+        slice_count[ptr] += len(slice_)
 ```
+After all tasks finish the merger asserts:
+
+```python
+for ptr, expected in planner_est_counts.items():
+    if len(master.get(ptr, [])) != expected:
+        log_conflict({
+          "json_path": ptr,
+          "reason": "slice_count_mismatch",
+          "expected": expected,
+          "actual": len(master.get(ptr, []))
+        })
+```
+
+Scalar conflicts and slice-count mismatches are the two cases that push
+records to the human queue.
 
 _We **do not hidden-concat duplicates of scalar paths**; every conflict goes to humans._
 
@@ -355,8 +485,9 @@ We score the system on two axes:
 | **1** | **Schema-Pass Rate**               | Chunk JSON `{ "runs-on": "ubunut" }` fails schema (enum mismatch) ➜ counted **fail**.<br> Auto-repair corrects to `"ubuntu-latest"` ➜ **pass**.   | `ok_chunks / total_chunks` after BAML auto-repair.                               | If this isn’t ≈ 1.0 downstream code will crash—hard P0 KPI.                |
 | **2** | **Field-Level F1**                 | Gold: `"batch_size": 32`.<br> Extracted: `30`.<br> → 1 false-neg (miss) + 1 false-pos (wrong value).<br> Precision = 0.5, Recall = 0.5, F1 = 0.5. | Exact string match for scalars; Jaccard for arrays; micro-averaged over corpus.  | Direct quality signal for recruiters: higher = fewer content errors.       |
 | **3** | **Hallucination Score**            | Extracted JSON contains DOI `"10.1234/ghost"`, which never appears in source PDF. ➜ counts toward hallucination.                                  | LLM grader (see below) flags unsupported values → `hallucinated / total_values`. | Proves extractor is “ copy-not-invent” – critical for compliance & audits. |
-| **4** | **Confidence Calibration** (Brier) | Model outputs `conf=0.9` on 100 fields but 20 are wrong.<br> Brier ≈ 0.18 (bad).                                                                  | $$\textstyle \frac1N\sum (p_i - y_i)^2$$ on raw_conf (before scaling).           | Tells us whether we can trust the numeric confidence to triage work.       |
-| **5** | **Human-Touch Rate**               | Out of 500 JSON paths, 42 land in `conflicts.ndjson` ➜ HTR = 0.084.                                                                               | `manual_paths / total_paths`.                                                    | Operational cost metric—lower = cheaper for client support team.           |
+| **4** | **Slice Completeness**             | Final array shorter/longer than probe (streaming integrity).                                                                                       | arrays_ok / arrays_total where ok = final length = probe                        | Streaming correctness.                                                     |
+| **5** | **Confidence Calibration** (Brier) | Model outputs `conf=0.9` on 100 fields but 20 are wrong.<br> Brier ≈ 0.18 (bad).                                                                  | $$\textstyle \frac1N\sum (p_i - y_i)^2$$ on raw_conf (before scaling).           | Tells us whether we can trust the numeric confidence to triage work.       |
+| **6** | **Human-Touch Rate**               | Out of 500 JSON paths, 42 land in `conflicts.ndjson` ➜ HTR = 0.084.                                                                               | `manual_paths / total_paths`.                                                    | Operational cost metric—lower = cheaper for client support team.           |
 
 ### 9.2 LLM grader for Hallucination & Field-F1
 
@@ -434,11 +565,5 @@ A chunk that passes schema but where the model is unsure (0.3 scaled) still gets
 2. **Supervised fine-tune** via OpenAI Fine-Tuning API
 
 > If unable to gather 50k examples, we can resort to `distillation`, i.e first fine-tune `gpt-4.1` and then distill it's responses into `gpt-4.1-mini`.
-
-### 10.2 Additional upgrades
-
-| Idea                          | Impact                                        |
-| ----------------------------- | --------------------------------------------- |
-| **Dynamic model tier switch** | Auto-swap Flash → Pro only when guards break. |
 
 ---
