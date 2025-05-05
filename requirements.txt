@@ -2,7 +2,6 @@ fastapi
 uvicorn[standard]
 pydantic
 baml-py
-baml-client
 litellm
 llama-index-core
 llama-index-embeddings-openai
@@ -13,3 +12,4 @@ ruff
 black
 pytest
 jsonschema
+python-dotenv

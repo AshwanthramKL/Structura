@@ -71,9 +71,15 @@ local_settings.py
 .env
 .env.*
 
-# cursor files
+# cursor/windsurf files
 .cursor/
+.windsurf/
 
 # Project specific
 experiments/
 data/
+temp_baml/
+explore_baml/
+baml_client/
+baml_src/
+archive/
