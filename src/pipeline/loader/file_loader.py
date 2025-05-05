@@ -1,61 +1,17 @@
 import os
 import mimetypes
-from typing import Dict, Any, Optional, BinaryIO, TextIO, Union, Tuple
-import io
+from typing import Dict, Any, Optional, BinaryIO, TextIO, Union, Type
 
-# Try to import PDF libraries, with graceful fallback
-try:
-    import fitz  # PyMuPDF
-    PYMUPDF_AVAILABLE = True
-except ImportError:
-    PYMUPDF_AVAILABLE = False
-
-try:
-    import pdfplumber
-    PDFPLUMBER_AVAILABLE = True
-except ImportError:
-    PDFPLUMBER_AVAILABLE = False
-
-
-class DocHandle:
-    """
-    Normalizes file input into a consistent handle with metadata.
-    
-    Attributes:
-        file_path (str): Original file path
-        mime_type (str): MIME type of the file
-        content (bytes): Raw file content
-        text (Optional[str]): Text content if available
-        size (int): File size in bytes
-        metadata (Dict[str, Any]): Additional file metadata
-    """
-    def __init__(
-        self, 
-        file_path: str, 
-        content: bytes,
-        mime_type: Optional[str] = None,
-        text: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None
-    ):
-        self.file_path = file_path
-        self.content = content
-        self.size = len(content)
-        self.mime_type = mime_type or mimetypes.guess_type(file_path)[0] or "application/octet-stream"
-        self.text = text
-        self.metadata = metadata or {}
-        
-    def __repr__(self) -> str:
-        return f"DocHandle(path='{self.file_path}', mime={self.mime_type}, size={self.size})"
-
+from src.pipeline.loader.doc_handle import DocHandle
+from src.pipeline.loader.base_loader import BaseFileLoader
+from src.pipeline.loader.text_loader import TextFileLoader, CSVLoader, JSONLoader
+from src.pipeline.loader.pdf_loader import PDFLoader
+from src.pipeline.loader.binary_loader import BinaryFileLoader
 
 class FileLoader:
     """
-    Loads files from various sources and formats into a normalized DocHandle.
-    Currently supports:
-    - PDF files (metadata only, content processed by chunker)
-    - Images (raw bytes, processed by vision models)
-    - Text files (txt, md, bib)
-    - CSV files
+    Factory class that selects and uses the appropriate loader for different file types.
+    Provides a unified interface to load various file formats while delegating to specialized loaders.
     """
     
     @classmethod
@@ -64,42 +20,38 @@ class FileLoader:
         Initialize the FileLoader by registering custom MIME types.
         Call this before using the FileLoader class.
         """
-        # Register additional MIME types
-        mimetypes.add_type('application/x-bibtex', '.bib')
-        mimetypes.add_type('text/markdown', '.md')
-        mimetypes.add_type('text/csv', '.csv')
+        # Initialize the base loader which registers MIME types
+        BaseFileLoader.initialize()
     
-    @staticmethod
-    def _get_pdf_page_count(content: bytes) -> int:
+    @classmethod
+    def get_loader_for_file(cls, file_path: str) -> Type[BaseFileLoader]:
         """
-        Get the page count of a PDF document.
+        Get the appropriate loader class for a file based on its extension.
         
         Args:
-            content: PDF file content in bytes
+            file_path: Path to the file
             
         Returns:
-            int: Number of pages in the PDF, or 0 if libraries not available
+            The appropriate loader class
         """
-        if PYMUPDF_AVAILABLE:
-            try:
-                with fitz.open(stream=content, filetype="pdf") as pdf:
-                    return len(pdf)
-            except Exception:
-                pass
+        _, ext = os.path.splitext(file_path)
+        ext = ext.lower()
         
-        if PDFPLUMBER_AVAILABLE:
-            try:
-                with pdfplumber.open(io.BytesIO(content)) as pdf:
-                    return len(pdf.pages)
-            except Exception:
-                pass
-                
-        return 0
+        if ext == ".pdf":
+            return PDFLoader
+        elif ext == ".csv":
+            return CSVLoader
+        elif ext == ".json":
+            return JSONLoader
+        elif ext in [".txt", ".md", ".bib"]:
+            return TextFileLoader
+        else:
+            return BinaryFileLoader
     
     @classmethod
     def load_file(cls, file_path: str) -> DocHandle:
         """
-        Load a file from disk into a DocHandle.
+        Load a file from disk using the appropriate loader.
         
         Args:
             file_path: Path to the file on disk
@@ -110,49 +62,11 @@ class FileLoader:
         Raises:
             FileNotFoundError: If the file doesn't exist
         """
-        # Ensure MIME types are registered
-        cls.initialize()
+        # Get the appropriate loader
+        loader_class = cls.get_loader_for_file(file_path)
         
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"File not found: {file_path}")
-        
-        # Get file extension and mime type
-        _, ext = os.path.splitext(file_path)
-        ext = ext.lower()
-        
-        # Read file content
-        with open(file_path, "rb") as f:
-            content = f.read()
-        
-        # Initialize metadata
-        metadata = {
-            "extension": ext,
-            "filename": os.path.basename(file_path)
-        }
-        
-        # Handle text extraction for different file types
-        text = None
-        if ext in [".txt", ".md", ".bib", ".csv", ".json"]:
-            # Text-based files
-            try:
-                text = content.decode("utf-8")
-            except UnicodeDecodeError:
-                # Fall back to latin-1 if UTF-8 fails
-                text = content.decode("latin-1") 
-        elif ext == ".pdf":
-            # Add PDF metadata but don't extract text
-            # (Text extraction will be handled by the chunker module using vision models)
-            page_count = cls._get_pdf_page_count(content)
-            if page_count > 0:
-                metadata["page_count"] = page_count
-                
-        # Create DocHandle
-        return DocHandle(
-            file_path=file_path,
-            content=content,
-            text=text,
-            metadata=metadata
-        )
+        # Use the loader to load the file
+        return loader_class.load_file(file_path)
     
     @classmethod
     def load_from_stream(
@@ -162,7 +76,7 @@ class FileLoader:
         mime_type: Optional[str] = None
     ) -> DocHandle:
         """
-        Load a file from a stream into a DocHandle.
+        Load a file from a stream using the appropriate loader.
         
         Args:
             stream: File-like object with read method
@@ -172,44 +86,27 @@ class FileLoader:
         Returns:
             DocHandle: Normalized file handle with content and metadata
         """
-        # Ensure MIME types are registered
-        cls.initialize()
+        # Use mime_type if provided, otherwise guess from file_name
+        if mime_type is None:
+            mime_type = mimetypes.guess_type(file_name)[0]
         
-        # Determine if we have binary or text stream
-        is_binary = hasattr(stream, 'mode') and 'b' in stream.mode
-        
-        # Read content
-        if is_binary:
-            content = stream.read()
-            text = None
-        else:
-            text_content = stream.read()
-            # Convert to bytes for storage
-            content = text_content.encode('utf-8')
-            text = text_content
-            
-        # Get extension and mime type
+        # Determine loader based on MIME type or file extension
         _, ext = os.path.splitext(file_name)
         ext = ext.lower()
         
-        metadata = {
-            "extension": ext,
-            "filename": os.path.basename(file_name)
-        }
+        if mime_type == "application/pdf" or ext == ".pdf":
+            loader_class = PDFLoader
+        elif mime_type == "text/csv" or ext == ".csv":
+            loader_class = CSVLoader
+        elif mime_type == "application/json" or ext == ".json":
+            loader_class = JSONLoader
+        elif mime_type and mime_type.startswith("text/") or ext in [".txt", ".md", ".bib"]:
+            loader_class = TextFileLoader
+        else:
+            loader_class = BinaryFileLoader
         
-        # For PDFs, add page count if possible
-        if ext == ".pdf" or mime_type == "application/pdf":
-            page_count = cls._get_pdf_page_count(content)
-            if page_count > 0:
-                metadata["page_count"] = page_count
-        
-        return DocHandle(
-            file_path=file_name,
-            content=content,
-            mime_type=mime_type,
-            text=text,
-            metadata=metadata
-        )
+        # Use the loader to load from the stream
+        return loader_class.load_from_stream(stream, file_name, mime_type)
     
     @classmethod
     def get_text_content(cls, doc_handle: DocHandle) -> str:
@@ -227,9 +124,7 @@ class FileLoader:
         Raises:
             NotImplementedError: For binary files that need specific extractors
         """
-        # Ensure MIME types are registered
-        cls.initialize()
-        
+        # If text is already available, return it
         if doc_handle.text is not None:
             return doc_handle.text
         

@@ -37,7 +37,7 @@ class TestFileLoader(unittest.TestCase):
         self.assertEqual(doc_handle.mime_type, "text/markdown")
         self.assertGreater(doc_handle.size, 0)
         self.assertIsNotNone(doc_handle.text)
-        self.assertIn("MkDocs Publisher", doc_handle.text)
+        self.assertIn("MkDocs Publisher", doc_handle.text or "")
         self.assertEqual(doc_handle.metadata["extension"], ".md")
     
     def test_load_json_file(self):
@@ -64,7 +64,7 @@ class TestFileLoader(unittest.TestCase):
         self.assertIn(doc_handle.mime_type, ["application/x-bibtex", "text/plain"])
         self.assertGreater(doc_handle.size, 0)
         self.assertIsNotNone(doc_handle.text)
-        self.assertIn("@inproceedings", doc_handle.text)
+        self.assertIn("@inproceedings", doc_handle.text or "")
         self.assertEqual(doc_handle.metadata["extension"], ".bib")
     
     def test_pdf_loading(self):
@@ -93,7 +93,7 @@ class TestFileLoader(unittest.TestCase):
         
         # Page count may be available if PDF libraries are installed
         if "page_count" in doc_handle.metadata:
-            self.assertGreater(doc_handle.metadata["page_count"], 0)
+            self.assertGreater(int(doc_handle.metadata["page_count"]), 0)
     
     def test_get_text_content(self):
         """Test extracting text content from different file types."""
@@ -101,7 +101,7 @@ class TestFileLoader(unittest.TestCase):
         md_handle = FileLoader.load_file(str(self.md_file))
         md_text = FileLoader.get_text_content(md_handle)
         self.assertIsNotNone(md_text)
-        self.assertIn("MkDocs Publisher", md_text)
+        self.assertIn("MkDocs Publisher", md_text or "")
         
         # Test with JSON file
         json_handle = FileLoader.load_file(str(self.json_file))
