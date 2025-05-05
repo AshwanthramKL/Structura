@@ -1,0 +1,25 @@
+{
+  "complex_schema_arrays_count": 1,
+  "model_tier_test_0": {
+    "model": "flash",
+    "chunking": false
+  },
+  "model_tier_test_1": {
+    "model": "flash",
+    "chunking": false
+  },
+  "model_tier_test_2": {
+    "model": "flash",
+    "chunking": false
+  },
+  "large_doc_needs_chunking": false,
+  "small_doc_needs_chunking": false,
+  "array_schema_output_tokens": 378,
+  "complex_schema_output_tokens": 178,
+  "complex_schema_array_paths": 1,
+  "real_api_text_token_count": 22,
+  "missing_api_key_fallback": 22,
+  "pdf_token_count": 25,
+  "text_token_count": 25,
+  "text_doc_token_count": 25
+}

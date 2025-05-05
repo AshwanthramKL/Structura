@@ -77,8 +77,36 @@ class Person {
 ## Limitations
 
 - Only local `$ref` ("#/definitions/…" or "#/$defs/...") pointers are supported
-- Complex keywords that BAML cannot express (e.g., `patternProperties`) are included as comments
+- Complex keywords that BAML cannot express (e.g., `patternProperties`) are included as descriptions to mapped attributes
 - External references are not supported
+
+## TODOs
+
+The following features need to be implemented to enhance schema compliance:
+
+1. **External References**: Implement `loader.resolve_refs` to support external references in JSON Schema
+   - Support references to external files and URLs
+   - Implement proper caching for external schemas
+   - Handle circular references across multiple files
+
+2. **Default Values**: Add support for the `default` keyword in JSON Schema [Source](https://docs.boundaryml.com/ref/baml/class#default-values)
+   - Preserve default values from the schema
+   - Potentially add as a BAML attribute or comment
+   - Ensure defaults are properly applied during extraction
+
+3. **Improved Null Handling**: 
+   - Ensure proper handling of properties with type: "null"
+   - Add more robust support for union types with null
+
+4. **Format Validation**:
+   - Add support for format validation (email, date, etc.)
+   - Add appropriate BAML annotations for format attributes
+
+5. **Hidden Fields Injection**:
+   - Implement automatic injection of the following hidden fields in every object as specified in the architecture:
+     - `confidence: float @hidden` - For model self-score (0-100)
+     - `unsure?: "not sure"` - Sentinel to avoid hallucinated values
+   - These fields help with model confidence tracking and prevent hallucination
 
 ## Validation
 
