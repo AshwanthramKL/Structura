@@ -1,0 +1,37 @@
+{
+  "type": "object",
+  "properties": {
+    "company": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "department": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" },
+            "team": {
+              "type": "object",
+              "properties": {
+                "name": { "type": "string" },
+                "members": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "name": { "type": "string" },
+                      "role": { "type": "string" },
+                      "skills": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+} 

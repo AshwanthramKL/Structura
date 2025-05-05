@@ -1,0 +1,11 @@
+{
+  "type": "object",
+  "properties": {
+    "email": {
+      "type": "string",
+      "format": "email",
+      "contentMediaType": "text/plain",
+      "contentEncoding": "base64"
+    }
+  }
+} 

@@ -1,0 +1,15 @@
+{
+  "type": "object",
+  "properties": {
+    "age": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 120
+    },
+    "score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 10
+    }
+  }
+} 

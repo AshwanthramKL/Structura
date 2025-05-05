@@ -1,0 +1,24 @@
+{
+  "type": "object",
+  "properties": {
+    "status": {
+      "oneOf": [
+        { "type": "string", "enum": ["pending", "active", "inactive"] },
+        { "type": "integer" }
+      ]
+    },
+    "contact": {
+      "anyOf": [
+        { "type": "string", "format": "email" },
+        { "type": "string", "format": "phone" },
+        {
+          "type": "object",
+          "properties": {
+            "email": { "type": "string" },
+            "phone": { "type": "string" }
+          }
+        }
+      ]
+    }
+  }
+} 

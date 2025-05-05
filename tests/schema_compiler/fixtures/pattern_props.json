@@ -1,0 +1,10 @@
+{
+  "type": "object",
+  "properties": {
+    "metadata": { "type": "string" }
+  },
+  "patternProperties": {
+    "^x-": { "type": "string" },
+    "^custom_[0-9]+$": { "type": "object" }
+  }
+} 

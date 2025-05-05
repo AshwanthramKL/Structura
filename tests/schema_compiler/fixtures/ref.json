@@ -1,0 +1,19 @@
+{
+  "definitions": {
+    "address": {
+      "type": "object",
+      "properties": {
+        "street": { "type": "string" },
+        "city": { "type": "string" },
+        "zip": { "type": "string" }
+      },
+      "required": ["street", "city"]
+    }
+  },
+  "type": "object",
+  "properties": {
+    "name": { "type": "string" },
+    "homeAddress": { "$ref": "#/definitions/address" },
+    "workAddress": { "$ref": "#/definitions/address" }
+  }
+} 
