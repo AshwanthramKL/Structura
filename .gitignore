@@ -71,6 +71,9 @@ local_settings.py
 .env
 .env.*
 
+# cursor files
+.cursor/
+
 # Project specific
 experiments/
-docs/Architecture_v0.md
+data/

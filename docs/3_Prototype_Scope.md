@@ -26,7 +26,7 @@ in limited time. Everything else is flagged as negotiable or postponed. (**NOTE:
   - **Why this won't be implemented in this prototype:**
     - First, have to perform EDA(for our usecase) to find out split between reasoning intensive and non-reasoning intensive tasks.
     - A reasoning intensive task in this appln: there exists a field in the schema that requires us to perform some calculations based on the values of other fields. eg. Total Bill value, CGST, SGST, provided in the bill, but we also need to calculate Taxable Value, IGST, etc.
-    - Experiment to find if the claim made in the paper is true or not.
+    - Experiment to find if the claim made in the paper is true or not. [Source](https://blog.dottxt.co/say-what-you-mean.html)
     - Then add a layer to determine if a task is reasoning intensive or not and perform `routing` based on that.
 
   Basically, due to time constraints, we won't be able to experiment(_also don't know if you guys have enough data points to perform EDA_) and implement this in this prototype.

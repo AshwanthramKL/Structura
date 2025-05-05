@@ -1,6 +1,8 @@
-boundaryml-baml
+baml-py
 jsonschema
 tiktoken
 google-generativeai
 PyMuPDF
 openai
+llama-index-core
+llama-index-embeddings-openai

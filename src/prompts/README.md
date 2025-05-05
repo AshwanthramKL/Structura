@@ -1,0 +1,2 @@
+- chunker.baml : splits input text into semantically coherent chunks
+- extractor_stream.baml : extracts fields given BAML schema (+ future slice args)
