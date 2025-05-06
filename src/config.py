@@ -76,3 +76,49 @@ MODEL_CONFIG = {
 # Token thresholds for chunking and output limits
 TOKEN_INPUT_THRESHOLD = 0.85  # Max percentage of context window for input
 TOKEN_OUTPUT_THRESHOLD = 0.95  # Max percentage of max_output_tokens
+
+# BAML client configuration mapping 
+# Maps Structura model tiers to BAML client configuration
+BAML_CLIENT_CONFIG = {
+    # Standard tier mapping
+    "mini": {
+        "primary": "StructuraMini",
+        "fallback": "StructuraPro",
+        "provider": "openai",
+        "options": {
+            "model": "gpt-4.1-mini",
+            "temperature": 0.0,
+            "max_tokens": 32000
+        }
+    },
+    "flash": {
+        "primary": "StructuraFlash",
+        "fallback": "StructuraPro",
+        "provider": "google-ai",
+        "options": {
+            "model": "gemini-2.5-flash-preview-04-17",
+            "temperature": 0.0,
+            "max_tokens": 65000
+        }
+    },
+    "full": {
+        "primary": "StructuraFull",
+        "fallback": "StructuraPro",
+        "provider": "openai",
+        "options": {
+            "model": "gpt-4.1",
+            "temperature": 0.0,
+            "max_tokens": 32000
+        }
+    },
+    "pro": {
+        "primary": "StructuraPro",
+        "fallback": "StructuraFull",
+        "provider": "google-ai",
+        "options": {
+            "model": "gemini-2.5-pro-preview-04-17",
+            "temperature": 0.0,
+            "max_tokens": 65000
+        }
+    }
+}
