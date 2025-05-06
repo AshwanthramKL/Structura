@@ -642,9 +642,16 @@ def baml_to_json_schema(baml_data: Dict[str, Any], schema: Dict[str, Any]) -> Di
     Returns:
         Dictionary with property names matching the original JSON Schema
     """
-    # Create a converter and set up the mappings
-    converter = Converter()
-    # Initialize the mappings by running the forward conversion
-    converter.json_schema_to_baml(schema)
-    # Now run the reverse conversion
-    return converter.baml_to_json_schema(baml_data)
+    try:
+        # Create a converter and set up the mappings
+        converter = Converter()
+        # Initialize the mappings by running the forward conversion
+        converter.json_schema_to_baml(schema)
+        # Now run the reverse conversion
+        return converter.baml_to_json_schema(baml_data)
+    except Exception as e:
+        # Log error but don't crash - return original data as fallback
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error converting BAML data back to JSON Schema: {e}")
+        logger.error(f"Returning original data without conversion")
+        return baml_data
