@@ -1,3 +1,0 @@
-- **chunker.baml** – BAML function `ChunkText` that splits input into semantic chunks.
-- **extractor_stream.baml** – BAML function `ExtractFields` that maps chunk → JSON slice.
-- **plain_regex.txt** – simple regex-based prompt for tiny schemas that don’t justify BAML.
