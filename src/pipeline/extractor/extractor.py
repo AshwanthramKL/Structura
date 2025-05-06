@@ -8,16 +8,36 @@ into structured data according to a JSON schema.
 import json
 import logging
 import base64
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Union
+import importlib
+import time
 
-from baml_py import ClientRegistry, Image
-from baml_client import b
+from baml_py import Image as BAMLImage
+from pydantic import BaseModel
 
 from src.pipeline.planner.planner import ExtractionPlan
 from src.pipeline.chunker.text_chunker import Chunk
 from src.schema_compiler.validator import SchemaValidator
+from src.schema_compiler.converter import baml_to_json_schema
+from src.baml_utils import generate_client, client_registry_service
 
 logger = logging.getLogger(__name__)
+
+
+class ExtractionResult(BaseModel):
+    """
+    Result of an extraction operation.
+    
+    Attributes:
+        data: The extracted structured data
+        success: Whether the extraction was successful
+        error: Error message if extraction failed
+        tokens: Token usage information
+    """
+    data: Dict[str, Any] = {}
+    success: bool = True
+    error: Optional[str] = None
+    tokens: Dict[str, int] = {}
 
 
 class Extractor:
@@ -38,6 +58,7 @@ class Extractor:
             max_retries: Maximum number of retry attempts for failed extractions
         """
         self.max_retries = max_retries
+        self._ensure_client()
     
     def extract(self, chunks: List[Chunk], plan: ExtractionPlan) -> Dict[str, Any]:
         """
@@ -55,16 +76,25 @@ class Extractor:
         """
         # For a single chunk, just extract directly
         if len(chunks) == 1:
-            return self._extract_from_chunk(chunks[0], plan)
+            result = self._extract_from_chunk(chunks[0], plan)
+            if result.success:
+                return result.data
+            else:
+                logger.error(f"Extraction failed: {result.error}")
+                return {}
         
         # For multiple chunks, extract from each and combine
         results = []
         errors = []
         
         for i, chunk in enumerate(chunks):
+            logger.info(f"Extracting from chunk {i+1}/{len(chunks)}")
             try:
                 result = self._extract_from_chunk(chunk, plan)
-                results.append(result)
+                if result.success:
+                    results.append(result.data)
+                else:
+                    errors.append(f"Chunk {i+1}: {result.error}")
             except Exception as e:
                 error_msg = f"Extraction from chunk {i+1}/{len(chunks)} failed: {str(e)}"
                 logger.error(error_msg)
@@ -79,7 +109,7 @@ class Extractor:
         # For now, we'll just return the first successful result
         return results[0]
     
-    def _extract_from_chunk(self, chunk: Chunk, plan: ExtractionPlan) -> Dict[str, Any]:
+    def _extract_from_chunk(self, chunk: Chunk, plan: ExtractionPlan) -> ExtractionResult:
         """
         Extract structured data from a single chunk using the extraction plan.
         
@@ -88,34 +118,85 @@ class Extractor:
             plan: Extraction plan from the planner
             
         Returns:
-            Extracted structured data conforming to the schema
+            ExtractionResult containing the extraction result
         """
+        # Ensure we have a valid BAML client
+        if not self._ensure_client():
+            return ExtractionResult(
+                success=False,
+                error="Failed to generate BAML client",
+                data={}
+            )
+        
         # Configure BAML client for the specified model
-        registry = self._configure_client(plan.model_tier)
+        registry = client_registry_service.get_registry(plan.model_tier)
+        collector = client_registry_service.get_collector()
+        
+        # Create client with options
+        try:
+            # Import the client module dynamically to avoid linter errors
+            # This will be available after _ensure_client() is called
+            baml_client = importlib.import_module("src.baml_client")
+            
+            # Create client with registry and collector
+            client = baml_client.b.with_options(
+                client_registry=registry,
+                collector=collector
+            )
+        except ImportError as e:
+            logger.error(f"Failed to import BAML client: {str(e)}")
+            return ExtractionResult(
+                success=False,
+                error=f"BAML client import error: {str(e)}",
+                data={}
+            )
+        except Exception as e:
+            logger.error(f"Failed to create BAML client: {str(e)}")
+            return ExtractionResult(
+                success=False,
+                error=f"BAML client error: {str(e)}",
+                data={}
+            )
         
         # Handle different types of chunks
-        if chunk.images:
-            return self._extract_from_images(chunk.images, plan, registry)
-        elif chunk.text:
-            return self._extract_from_text(chunk.text, plan, registry)
-        else:
-            raise ValueError("Chunk contains neither text nor images")
+        try:
+            if chunk.images:
+                    return self._extract_from_images(client, chunk.images, plan)
+            elif chunk.text:
+                    return self._extract_from_text(client, chunk.text, plan)
+            else:
+                    return ExtractionResult(
+                        success=False,
+                        error="Chunk contains neither text nor images",
+                        data={}
+                    )
+        except Exception as e:
+            logger.error(f"Extraction error: {str(e)}")
+            return ExtractionResult(
+                success=False,
+                error=f"Extraction error: {str(e)}",
+                data={}
+            )
     
-    def _extract_from_text(self, text: str, plan: ExtractionPlan, 
-                          registry: ClientRegistry) -> Dict[str, Any]:
+    def _extract_from_text(self, client: Any, text: str, plan: ExtractionPlan) -> ExtractionResult:
         """
         Extract from text content with retry capability.
         
         Args:
+            client: Configured BAML client
             text: The text content to extract from
             plan: Extraction plan containing schema information
-            registry: Configured BAML client registry
             
         Returns:
-            Extracted structured data
+            ExtractionResult with extraction result
         """
+        # If the text is empty, return an empty result
         if not text.strip():
-            raise ValueError("Empty text content")
+            return ExtractionResult(
+                success=False,
+                error="Empty text content",
+                data={}
+            )
         
         # Try extraction with retries
         last_error = None
@@ -123,179 +204,189 @@ class Extractor:
         for attempt in range(self.max_retries + 1):
             try:
                 # Call BAML client with the text input
-                # Access the BAML function dynamically as it's generated from the BAML files
-                result_json = getattr(b, "extractor")(
+                result = client.extractor(
                     input=text,
                     schema=plan.schema_baml,
-                    is_image=False,
-                    client_registry=registry
+                    is_image=False
                 )
                 
-                # Parse and validate the result
-                return self._parse_and_validate(result_json, plan.schema_json)
+                # Convert property names back to original schema format
+                data = baml_to_json_schema(self._parse_result(result), plan.schema_json)
+                
+                # TODO: Use SchemaValidator to validate the data against the schema
+                # validator = SchemaValidator(plan.schema_json)
+                # validator.validate(data)
+                
+                # Get token usage from collector
+                tokens = self._get_token_usage()
+                
+                # Return successful result with data and token usage
+                return ExtractionResult(
+                    success=True,
+                    data=data,
+                    tokens=tokens
+                )
             except Exception as e:
                 last_error = str(e)
                 logger.warning(f"Extraction attempt {attempt+1} failed: {last_error}")
+                time.sleep(1)  # Brief pause before retry
         
         # If we get here, all attempts failed
-        raise ValueError(f"All extraction attempts failed. Last error: {last_error}")
+        return ExtractionResult(
+            success=False,
+            error=f"All extraction attempts failed. Last error: {last_error}",
+            data={}
+        )
     
-    def _extract_from_images(self, images: List[bytes], plan: ExtractionPlan,
-                            registry: ClientRegistry) -> Dict[str, Any]:
+    def _extract_from_images(self, client: Any, images: List[Tuple[bytes, str]], plan: ExtractionPlan) -> ExtractionResult:
         """
         Extract from image content.
         
         Args:
-            images: List of image data
+            client: Configured BAML client
+            images: List of tuples containing (image_data, mime_type)
             plan: Extraction plan containing schema information
-            registry: Configured BAML client registry
             
         Returns:
-            Extracted structured data
+            ExtractionResult with extraction result
         """
         if not images:
-            raise ValueError("Empty image list")
+            return ExtractionResult(
+                success=False,
+                error="Empty image list",
+                data={}
+            )
         
         # Convert image bytes to BAML Image objects
         baml_images = []
-        for image_data in images:
+        for image_tuple in images:
             try:
+                # Unpack the tuple
+                image_data, mime_type = image_tuple
+                
                 # Convert binary image data to base64 string first
                 image_b64 = base64.b64encode(image_data).decode('utf-8')
                 
-                # Create BAML Image from base64 string
-                baml_image = Image.from_base64("image/png", image_b64)
+                # Create BAML Image using the correct MIME type
+                baml_image = BAMLImage.from_base64(mime_type, image_b64)
                 baml_images.append(baml_image)
             except Exception as e:
                 logger.error(f"Failed to process image: {str(e)}")
                 # Continue with other images if one fails
         
         if not baml_images:
-            raise ValueError("Failed to process any images in the chunk")
+            return ExtractionResult(
+                success=False,
+                error="Failed to process any images in the chunk",
+                data={}
+            )
         
         try:
             # Call BAML client with the image inputs
-            # Access the BAML function dynamically as it's generated from the BAML files
-            result_json = getattr(b, "extractor")(
+            result = client.extractor(
                 input=baml_images,
                 schema=plan.schema_baml,
-                is_image=True,
-                client_registry=registry
+                is_image=True
             )
             
-            # Parse and validate the result
-            return self._parse_and_validate(result_json, plan.schema_json)
+            # Convert property names back to original schema format
+            data = baml_to_json_schema(self._parse_result(result), plan.schema_json)
+            
+            # TODO: Use SchemaValidator to validate the data against the schema
+            # validator = SchemaValidator(plan.schema_json)
+            # validator.validate(data)
+            
+            # Get token usage from collector
+            tokens = self._get_token_usage()
+            
+            # Return successful result with data and token usage
+            return ExtractionResult(
+                success=True,
+                data=data,
+                tokens=tokens
+            )
         except Exception as e:
             error_msg = f"Image extraction failed: {str(e)}"
             logger.error(error_msg)
-            raise ValueError(error_msg)
+            return ExtractionResult(
+                success=False,
+                error=error_msg,
+                data={}
+            )
     
-    def _configure_client(self, model_tier: str) -> ClientRegistry:
+    def _parse_result(self, result: Any) -> Dict[str, Any]:
         """
-        Configure BAML client for the specified model tier.
+        Parse the result from BAML client.
+        
+        The BAML client returns a structured object that needs to be converted to a dict.
         
         Args:
-            model_tier: The model tier to use (mini, flash, full, pro)
+            result: Result from BAML client
             
         Returns:
-            Configured BAML client registry
+            Dict representation of the result
         """
-        registry = ClientRegistry()
+        # For StructuredData class, get the data attribute
+        if hasattr(result, 'data'):
+            # If data is a string (likely JSON), parse it
+            if isinstance(result.data, str):
+                try:
+                    return json.loads(result.data)
+                except json.JSONDecodeError:
+                    # If not valid JSON, return as is
+                    return {"data": result.data}
+            else:
+                # If data is not a string, it might be an object or dict already
+                return {"data": result.data}
         
-        # Configure based on model tier
-        if model_tier == "mini":
-            registry.add_llm_client(
-                name="StructuraMini",
-                provider="openai",
-                options={
-                    "model": "gpt-4-0125-preview",
-                    "temperature": 0.2,
-                    "max_tokens": 4096
-                }
-            )
-            registry.set_primary("StructuraMini")
-        elif model_tier == "flash":
-            registry.add_llm_client(
-                name="StructuraFlash",
-                provider="google-ai",
-                options={
-                    "model": "gemini-1.5-flash",
-                    "temperature": 0.2,
-                    "max_tokens": 8192
-                }
-            )
-            registry.set_primary("StructuraFlash")
-        elif model_tier == "full":
-            registry.add_llm_client(
-                name="StructuraFull",
-                provider="openai",
-                options={
-                    "model": "gpt-4-turbo",
-                    "temperature": 0.2,
-                    "max_tokens": 4096
-                }
-            )
-            registry.set_primary("StructuraFull")
-        elif model_tier == "pro":
-            registry.add_llm_client(
-                name="StructuraPro",
-                provider="google-ai",
-                options={
-                    "model": "gemini-1.5-pro",
-                    "temperature": 0.2,
-                    "max_tokens": 8192
-                }
-            )
-            registry.set_primary("StructuraPro")
-        else:
-            # Default to mini if unknown tier
-            logger.warning(f"Unknown model tier: {model_tier}, defaulting to mini")
-            registry.add_llm_client(
-                name="StructuraDefault",
-                provider="openai",
-                options={
-                    "model": "gpt-4-0125-preview",
-                    "temperature": 0.2,
-                    "max_tokens": 4096
-                }
-            )
-            registry.set_primary("StructuraDefault")
+        # If the result is already a dict-like object, convert to dict
+        if hasattr(result, '__dict__'):
+            return vars(result)
         
-        return registry
+        # If we can't parse it, return as is
+        return {"result": str(result)}
     
-    def _parse_and_validate(self, json_str: str, schema: Dict[str, Any]) -> Dict[str, Any]:
+    def _get_token_usage(self) -> Dict[str, int]:
         """
-        Parse JSON string and validate against schema.
-        
-        Args:
-            json_str: JSON string to parse
-            schema: JSON schema to validate against
+        Get token usage information from the collector.
             
         Returns:
-            Parsed and validated data
-            
-        Raises:
-            ValueError: If parsing or validation fails
+            Dict with token usage information
         """
-        # Parse JSON
-        try:
-            data = json.loads(json_str)
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse JSON: {str(e)}")
-            raise ValueError(f"Invalid JSON response: {str(e)}")
+        collector = client_registry_service.get_collector()
+        tokens = {"total": 0, "prompt": 0, "completion": 0}
         
-        # Validate against schema
+        if collector and collector.logs:
+            last_log = collector.logs[-1]
+            if hasattr(last_log, 'usage') and last_log.usage:
+                # Defensively get attributes in case the API changes
+                usage = last_log.usage
+                tokens["prompt"] = getattr(usage, "input_tokens", 0)
+                tokens["completion"] = getattr(usage, "output_tokens", 0)
+                tokens["total"] = getattr(usage, "total_tokens", int(tokens["prompt"]) + int(tokens["completion"]))
+        
+        return tokens
+    
+    def _ensure_client(self) -> bool:
+        """
+        Ensure that the BAML client is generated and available.
+        
+        Returns:
+            bool: True if client is available, False otherwise
+        """
         try:
-            is_valid, errors = SchemaValidator.validate(
-                data, schema, raise_exception=False
-            )
+            # PROTOTYPE APPROACH: Always regenerate client for maximum reliability
+            # TODO: Optimization - Replace with timestamp-based regeneration:
+            #   if not generate_client(force=False):
+            #       logger.error("Failed to generate BAML client")
+            #       return False
             
-            if not is_valid:
-                error_paths = [e["path"] for e in errors]
-                logger.warning(f"Schema validation failed at: {', '.join(error_paths)}")
-                # We still return the data even if validation fails
+            # Always force regeneration to ensure client is fresh
+            if not generate_client(force=True):
+                logger.error("Failed to generate BAML client")
+                return False
             
-            return data
+            return True
         except Exception as e:
-            logger.error(f"Schema validation error: {str(e)}")
-            raise ValueError(f"Schema validation error: {str(e)}")
+            logger.error(f"Error ensuring BAML client availability: {str(e)}")
+            return False
