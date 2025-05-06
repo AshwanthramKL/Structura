@@ -6,7 +6,7 @@ as determined by the Planner. It uses semantic chunking to preserve meaning
 across chunk boundaries.
 """
 
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
 
 from llama_index.core.node_parser import SentenceSplitter
@@ -22,13 +22,13 @@ class Chunk:
     
     Attributes:
         text: The text content of the chunk (for text documents)
-        images: List of image data for PDF pages (for PDF documents)
+        images: List of tuples containing (image_data, mime_type) for images/PDF pages
         metadata: Additional metadata about the chunk
         index: Position of this chunk in the sequence
         total_chunks: Total number of chunks in the document
     """
     text: Optional[str] = None
-    images: Optional[List[bytes]] = None
+    images: Optional[List[Tuple[bytes, str]]] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
     index: int = 0
     total_chunks: int = 1
