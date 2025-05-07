@@ -38,14 +38,16 @@ import json
 import logging
 import argparse
 from pathlib import Path
+import uuid
 from typing import Dict, Any, Optional, Union
 
 from src.pipeline.chunker.text_chunker import TextChunker
 from src.pipeline.extractor import Extractor
 from src.pipeline.loader.doc_handle import DocHandle
 from src.pipeline.planner.planner import Planner
+from src.pipeline.chunker import Chunk
 from src.schema_compiler.validator import SchemaValidator
-from src.schema_compiler.converter import json_schema_to_baml
+from src.schema_compiler.converter import json_schema_to_typebuilder_baml
 
 # Configure logging
 logging.basicConfig(
@@ -105,20 +107,15 @@ def run_full_pipeline(schema_file: str, text_file: str, output_file: Optional[st
         metadata={"source": text_file}
     )
     
-    # Step 4: Chunk the document using TextChunker
-    logger.info("Chunking document...")
-    chunker = TextChunker()
-    chunks = chunker.chunk(doc_handle)
-    logger.info(f"Document chunked into {len(chunks)} chunks")
-    
-    # Step 5: Create extraction plan using Planner
+    # Step 4: Create extraction plan using Planner
     logger.info("Creating extraction plan...")
     planner = Planner()
     
     # Convert JSON schema to BAML using schema compiler
-    logger.info("Converting JSON schema to BAML...")
-    schema_baml = json_schema_to_baml(schema_json, root_name="Root")
-    logger.info(f"BAML schema generated with {len(schema_baml.splitlines())} lines")
+    # Using json_schema_to_typebuilder_baml as the Extractor will use this for TypeBuilder
+    logger.info("Converting JSON schema to BAML for TypeBuilder and Planner...")
+    schema_baml = json_schema_to_typebuilder_baml(schema_json)
+    logger.info(f"TypeBuilder BAML schema generated with {len(schema_baml.splitlines())} lines")
     
     # Create extraction plan
     plan = planner.plan(
@@ -129,6 +126,32 @@ def run_full_pipeline(schema_file: str, text_file: str, output_file: Optional[st
     logger.info(f"Extraction plan created with model tier: {plan.model_tier}")
     logger.info(f"Total input tokens: {plan.total_input_tokens}, Expected output tokens: {plan.expected_output_tokens}")
     logger.info(f"Chunking needed: {plan.needs_chunking}")
+
+    # Step 5: Chunk the document using TextChunker if needed
+    if plan.needs_chunking:
+        logger.info("Chunking document as per plan...")
+        chunker = TextChunker()
+        chunks = chunker.chunk(doc_handle)
+        logger.info(f"Document chunked into {len(chunks)} chunks")
+    else:
+        logger.info("Chunking not required by plan. Creating a single chunk for the entire document.")
+        # Create a single chunk containing the full text if no chunking is needed.
+        # Ensure the Chunk structure matches what TextChunker would produce for a single item.
+        # The id and metadata can be simple for this single chunk.
+        chunks = [
+            Chunk(
+                text=doc_handle.text, 
+                metadata={
+                    "source": doc_handle.file_path or "text_input",
+                    "mime_type": doc_handle.mime_type,
+                    "start_char_idx": 0,
+                    "end_char_idx": len(doc_handle.text) if doc_handle.text else 0
+                },
+                index=0,
+                total_chunks=1
+            )
+        ]
+        logger.info(f"Created a single chunk for the document.")
     
     # Step 6: Perform extraction using Extractor with TypeBuilder
     logger.info("Extracting structured data...")

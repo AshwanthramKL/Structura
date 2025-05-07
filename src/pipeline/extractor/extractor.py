@@ -8,7 +8,7 @@ into structured data according to a JSON schema.
 import json
 import logging
 import base64
-from typing import Dict, Any, List, Optional, Tuple, Union
+from typing import Dict, Any, List, Optional, Tuple
 import importlib
 import time
 
@@ -18,7 +18,7 @@ from pydantic import BaseModel
 from src.pipeline.planner.planner import ExtractionPlan
 from src.pipeline.chunker.text_chunker import Chunk
 from src.schema_compiler.validator import SchemaValidator
-from src.schema_compiler.converter import baml_to_json_schema, json_schema_to_typebuilder_baml
+from src.schema_compiler.converter import baml_to_json_schema
 from src.baml_utils import generate_client, client_registry_service
 
 # Note: We dynamically import TypeBuilder and other BAML client modules using importlib.import_module().
@@ -215,11 +215,8 @@ class Extractor:
                     type_builder_module = importlib.import_module("src.baml_client.type_builder")
                     tb = type_builder_module.TypeBuilder()
                     
-                    # Generate BAML schema for TypeBuilder
-                    baml_schema = json_schema_to_typebuilder_baml(plan.schema_json)
-                    
-                    # Add the schema to TypeBuilder
-                    tb.add_baml(baml_schema)
+                    # Use pre-generated TypeBuilder BAML from the plan
+                    tb.add_baml(plan.schema_baml)
                     
                     # Set baml_options for the client call
                     options = {"tb": tb}
@@ -241,6 +238,19 @@ class Extractor:
                 else:
                     # Standard approach - parse result normally
                     data = baml_to_json_schema(self._parse_result(result), plan.schema_json)
+                
+                # Validate extracted data internally
+                is_valid, validation_errors = SchemaValidator.validate(data, plan.schema_json, raise_exception=False)
+                if not is_valid:
+                    error_messages = [f"Error at '{err['path']}': {err['message']}" for err in validation_errors]
+                    full_error_msg = f"Schema validation failed for chunk {chunk.id}: {'; '.join(error_messages)}"
+                    logger.error(full_error_msg)
+                    return ExtractionResult(
+                        success=False,
+                        error=full_error_msg,
+                        data=data, # Return potentially invalid data for debugging
+                        tokens=self._get_token_usage() # Still log tokens
+                    )
                 
                 # Get token usage from collector
                 tokens = self._get_token_usage()
@@ -282,87 +292,81 @@ class Extractor:
                 data={}
             )
         
-        # Convert image bytes to BAML Image objects
-        baml_images = []
-        for image_tuple in images:
-            try:
-                # Unpack the tuple
-                image_data, mime_type = image_tuple
-                
-                # Convert binary image data to base64 string first
-                image_b64 = base64.b64encode(image_data).decode('utf-8')
-                
-                # Create BAML Image using the correct MIME type
-                baml_image = BAMLImage.from_base64(mime_type, image_b64)
-                baml_images.append(baml_image)
-            except Exception as e:
-                logger.error(f"Failed to process image: {str(e)}")
-                # Continue with other images if one fails
-        
-        if not baml_images:
+        # Dynamically import TypeBuilder and related BAML client types
+        try:
+            type_builder_module = importlib.import_module("src.baml_client.type_builder")
+            tb = type_builder_module.TypeBuilder()
+        except ImportError as e:
+            logger.error(f"Failed to import BAML client types: {str(e)}")
             return ExtractionResult(
                 success=False,
-                error="Failed to process any images in the chunk",
+                error=f"BAML client import error: {str(e)}",
                 data={}
             )
+        
+        images_for_baml = []
+        for image_tuple in images:
+            # Unpack the tuple
+            image_data, mime_type = image_tuple
+            
+            # Encode raw bytes to base64 string before passing to Image.from_base64
+            image_b64_string = base64.b64encode(image_data).decode('utf-8')
+            
+            # The BAML template extractor.baml now uses `{{ image }}` which expects a BAMLImage object
+            # Image.from_base64 is used to construct this object
+            images_for_baml.append(BAMLImage.from_base64(media_type=mime_type, base64=image_b64_string))
+
+        logger.info(f"Prepared {len(images_for_baml)} images for BAML client.")
         
         try:
-            # Import and configure TypeBuilder dynamically using importlib
-            # This avoids linter errors and is consistent with our client import pattern
+            # Use pre-generated TypeBuilder BAML from the plan
+            tb.add_baml(plan.schema_baml)
+            
+            # Set baml_options for the client call
+            options = {"tb": tb}
+        except (ImportError, AttributeError) as e:
+            logger.warning(f"TypeBuilder not available, falling back to standard extraction: {str(e)}")
             options = {}
-            try:
-                # The TypeBuilder module will be available after _ensure_client() is called
-                type_builder_module = importlib.import_module("src.baml_client.type_builder")
-                tb = type_builder_module.TypeBuilder()
-                
-                # Generate BAML schema for TypeBuilder
-                baml_schema = json_schema_to_typebuilder_baml(plan.schema_json)
-                
-                # Add the schema to TypeBuilder
-                tb.add_baml(baml_schema)
-                
-                # Set baml_options for the client call
-                options = {"tb": tb}
-            except (ImportError, AttributeError) as e:
-                logger.warning(f"TypeBuilder not available, falling back to standard extraction: {str(e)}")
-                
-            # Call BAML client with the image inputs and TypeBuilder if available
-            result = client.Extractor(
-                input=baml_images,
-                schema=plan.schema_baml,
-                is_image=True,
-                baml_options=options
-            )
-            
-            # Parse result based on whether TypeBuilder was used
-            if hasattr(result, 'rootObj'):
-                # TypeBuilder approach - access rootObj
-                data = self._convert_to_dict(result.rootObj)
-            else:
-                # Standard approach - parse result normally
-                data = baml_to_json_schema(self._parse_result(result), plan.schema_json)
-            
-            # TODO: Use SchemaValidator to validate the data against the schema
-            # validator = SchemaValidator(plan.schema_json)
-            # validator.validate(data)
-            
-            # Get token usage from collector
-            tokens = self._get_token_usage()
-            
-            # Return successful result with data and token usage
-            return ExtractionResult(
-                success=True,
-                data=data,
-                tokens=tokens
-            )
-        except Exception as e:
-            error_msg = f"Image extraction failed: {str(e)}"
-            logger.error(error_msg)
+        
+        # Call BAML client with the image inputs and TypeBuilder if available
+        result = client.Extractor(
+            input=images_for_baml,
+            schema=plan.schema_baml,
+            is_image=True,
+            baml_options=options
+        )
+        
+        # Parse result based on whether TypeBuilder was used
+        if hasattr(result, 'rootObj'):
+            # TypeBuilder approach - access rootObj
+            data = self._convert_to_dict(result.rootObj)
+        else:
+            # Standard approach - parse result normally
+            data = baml_to_json_schema(self._parse_result(result), plan.schema_json)
+        
+        # Validate extracted data internally
+        is_valid, validation_errors = SchemaValidator.validate(data, plan.schema_json, raise_exception=False)
+        if not is_valid:
+            error_messages = [f"Error at '{err['path']}': {err['message']}" for err in validation_errors]
+            image_identifier = "current_image_set"
+            full_error_msg = f"Schema validation failed for {image_identifier}: {'; '.join(error_messages)}"
+            logger.error(full_error_msg)
             return ExtractionResult(
                 success=False,
-                error=error_msg,
-                data={}
+                error=full_error_msg,
+                data=data, # Return potentially invalid data
+                tokens=self._get_token_usage()
             )
+
+        # Get token usage from collector
+        tokens = self._get_token_usage()
+        
+        # Return successful result with data and token usage
+        return ExtractionResult(
+            success=True,
+            data=data,
+            tokens=tokens
+        )
     
     def _parse_result(self, result: Any) -> Dict[str, Any]:
         """

@@ -14,6 +14,7 @@ function Extractor(input: string | image[], schema: string, is_image: bool) -> D
     You are a structured data extraction assistant. Your task is to extract structured data from 
     the provided content according to the schema definition. Follow these rules carefully:
     
+    INSTRUCTIONS:
     1. Only extract information that is explicitly mentioned in the content
     2. If a field is required by the schema but not found in the content, use null or an appropriate empty value
     3. Follow the types specified in the schema (string, number, boolean, etc.) precisely
@@ -27,16 +28,17 @@ function Extractor(input: string | image[], schema: string, is_image: bool) -> D
     Return ONLY the extracted JSON object, without any explanations, comments, or markdown formatting.
     
     {% if is_image %}
-    Extract structured data from the following {{ input | length }} image(s) according to the schema.
+    Extract structured data from the following image(s) according to the schema following the instructions mentioned above.
     
     {% for image in input %}
     ## Image {{ loop.index }}
     {{ image }}
     {% endfor %}
     {% else %}
-    Extract structured data from the following text according to the schema.
-    
+    Extract structured data from the following text according to the schema following the instructions mentioned above.
+    <text>
     {{ input }}
+    </text>
     {% endif %}
     
     {{ ctx.output_format }}
@@ -44,3 +46,35 @@ function Extractor(input: string | image[], schema: string, is_image: bool) -> D
     Extract the data as a single valid JSON object that conforms to the schema.
   "#
 } 
+
+
+
+test Test1 {
+  functions [Extractor]
+  type_builder {
+    // Defines a new type available only within this test block.
+    dynamic class DynamicResult {
+    quote string @description(#"
+      A one line philosophical quote that you think resonates with this input
+    "#)
+    }
+  }
+
+  args {
+    input #"
+      John Doe
+
+      Education
+      - University of California, Berkeley
+        - B.S. in Computer Science
+        - 2020
+
+      Skills
+      - Python
+      - Java
+      - C++
+    "#
+    schema ""
+    is_image false
+  }
+}
