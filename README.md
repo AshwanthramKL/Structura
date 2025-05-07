@@ -1,9 +1,9 @@
 # STRUCTURA - Turning Unstructured Docs into Schema-Tight JSON
 
-This repo accompanies the design document for STRUCTURA a system that ingests unstructured documents and emits JSON that passes the desired schema.
+This repo contains STRUCTURA, a system that ingests unstructured documents and emits JSON that passes the desired schema.
 
 * **Language**: Python 3.12  
-* **Core libs**: `boundaryml‑baml`, `jsonschema`, `tiktoken`, `google‑ai‑sdk`, `openai-sdk`, `llama-index`
+* **Core libs**: `boundaryml‑baml`, `jsonschema`, `tiktoken`, `google‑ai‑sdk`, `openai-sdk`, `llama-index`, `typebuilder`
 
 ## Components
 
@@ -18,6 +18,7 @@ The Schema Compiler converts JSON Schema definitions to BAML types, enabling typ
 - Adds attributes like `@description`
 - Preserves references to definitions
 - Properly formats array types
+- Handles BAML reserved keywords (including Jinja template keywords like `if`, `for`, `with`)
 
 ### Document Loader ✅
 
@@ -28,69 +29,72 @@ The Document Loader handles various file types and normalizes them to a common f
 - Extracts content from binary files
 - Returns a standardized DocHandle format
 
-### Planner 🔄
+### Planner ✅
 
 The Planner module manages token counting and chunking decisions:
-- Basic token counting implementation
+- Token counting implementation using Gemini API
 - Model tier selection based on token count
-- Simple chunking decision logic
-- Note: Advanced array handling deferred for future versions
+- Chunking decision logic based on document size
+- Schema analysis for proper extraction planning
 
-### Chunker 🔄
+### Chunker ✅
 
 The Chunker breaks large documents into manageable pieces:
 - Using LlamaIndex SemanticTextSplitter for text documents
-- Simple approach without custom LLM integration
-- Note: Advanced PDF chunking deferred for future versions
+- Maintains chunk context for better extraction
 
-### Extractor 🔄
+### Extractor ✅
 
 The Extractor processes chunks and extracts schema-compliant JSON:
-- Basic BAML integration for extraction
-- Simple prompt template design
-- Note: Streaming and confidence scoring deferred for future versions
+- Full BAML integration for extraction
+- TypeBuilder integration for dynamic schema support
+- Advanced prompt template design
+- Support for both text and image extraction
 
-### Merger 🔄
+### Validator ✅
 
-The Merger combines extracted chunks into a final document:
-- Basic first-write-wins approach for scalars
-- Simple array concatenation
-- Basic conflict detection
-- Note: Complex conflict resolution deferred for future versions
+The Validator ensures extracted data conforms to the schema:
+- JSON Schema validation
+- Detailed error reporting
+- Support for complex data structures
 
 ## Current Progress
 
-- ✅ Schema Compiler: Fully implemented with tests
-- ✅ Document Loader: Fully implemented with tests for various file types
-- 🔄 Planner: Simplified implementation in progress
-- 🔄 Chunker: Simplified implementation in progress
-- 🔄 Extractor: Simplified implementation in progress
-- 🔄 Merger: Simplified implementation in progress
+- ✅ Schema Compiler: Fully implemented with TypeBuilder integration
+- ✅ Document Loader: Fully implemented with support for various file types
+- ✅ Planner: Complete implementation with token-aware planning
+- ✅ Chunker: Full implementation with semantic text splitting
+- ✅ Extractor: Complete implementation with TypeBuilder integration
+- ✅ Validator: Fully implemented for schema conformance checking
 
-## Prototype Scope
+## Running the Pipeline
 
-For the initial prototype, we are implementing a simplified version that demonstrates core functionality:
-
-1. Basic document processing pipeline
-2. Text-based chunking using LlamaIndex
-3. BAML integration for schema-compliant extraction
-4. Simple merging approach
-
-See `.cursor/deferred_features.md` for details on features deferred to future versions.
-
-## Running Tests
+The system includes a generic pipeline script that can process any text with any JSON schema:
 
 ```bash
-python run_schema_tests.py  # Schema compiler tests
-python run_tests.py         # General tests
+python test_full_pipeline.py --schema <schema_file> --text <text_file> [--output <output_file>]
 ```
 
-## Demo
-
-To run a simple end-to-end demo:
+Examples:
 ```bash
-# Coming soon
+# Basic usage
+python test_full_pipeline.py --schema data/schema.json --text data/sample.md
+
+# With output file
+python test_full_pipeline.py --schema data/github_actions_schema.json --text "data/github actions sample input.md" --output results.json
+
+# Save logs for detailed analysis
+python test_full_pipeline.py --schema data/paper_citations_schema.json --text data/bibtex_file.bib | tee extraction_logs.txt
 ```
+
+## TypeBuilder Integration
+
+Structura now integrates with TypeBuilder to allow dynamic schema extension at runtime:
+
+- Dynamic generation of BAML schemas from JSON Schema
+- Runtime extension of types 
+- Support for complex schema validation
+- Improved extraction accuracy with structured outputs
 
 ## Future Enhancements
 
@@ -98,15 +102,9 @@ Future versions will include:
 1. Array streaming for large documents
 2. Advanced confidence scoring
 3. Complex conflict resolution with human queue
-4. Vision-based PDF chunking
+4. Vision-based PDF chunking with structured extraction
 5. Advanced evaluation metrics
 6. Additional file type support
-
-
-The schema compiler tests include:
-- Basic conversion tests for simple and complex schemas
-- Edge case tests for nested objects, complex arrays, union types, etc.
-- Integration tests with BAML CLI tools
 
 ## Token-Aware Planner
 
