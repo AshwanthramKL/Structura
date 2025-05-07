@@ -1,16 +1,15 @@
 // BAML prompt template for structured data extraction
 // Supports both text and image/PDF extraction
 
-// Define a class to hold the extracted structured data
-class StructuredData {
-  // This is a placeholder for the dynamic data
-  // The actual structure will be determined by the schema passed to the function
-  data string
+// Define a placeholder class that will be extended at runtime
+class DynamicResult {
+  id string @description("Identifier - this will be the name of the class")
+  @@dynamic // Mark as dynamic to allow extension at runtime
 }
 
 // Create a function to extract structured data according to a schema
-function extractor(input: union(string, array<image>), schema: string, is_image: boolean = false) -> StructuredData {
-  client "openai/gpt-4.1" // Default client, can be overridden at runtime
+function Extractor(input: string | image[], schema: string, is_image: bool) -> DynamicResult {
+  client "openai/gpt-4o"
   prompt #"
     You are a structured data extraction assistant. Your task is to extract structured data from 
     the provided content according to the schema definition. Follow these rules carefully:
@@ -26,25 +25,21 @@ function extractor(input: union(string, array<image>), schema: string, is_image:
     9. If certain information is ambiguous, choose the most likely interpretation based on context
     
     Return ONLY the extracted JSON object, without any explanations, comments, or markdown formatting.
-
-    {{#if is_image}}
-    Extract structured data from the following {{input.length}} page(s) according to the schema.
     
-    {{#each input as |image index|}}
-    ## Page {{add index 1}}
+    {% if is_image %}
+    Extract structured data from the following {{ input | length }} image(s) according to the schema.
+    
+    {% for image in input %}
+    ## Image {{ loop.index }}
     {{ image }}
-    {{/each}}
-    {{else}}
+    {% endfor %}
+    {% else %}
     Extract structured data from the following text according to the schema.
     
-    ## Text Content
-    {{input}}
-    {{/if}}
+    {{ input }}
+    {% endif %}
     
-    ## Schema Definition
-    ```
-    {{schema}}
-    ```
+    {{ ctx.output_format }}
     
     Extract the data as a single valid JSON object that conforms to the schema.
   "#

@@ -655,3 +655,74 @@ def baml_to_json_schema(baml_data: Dict[str, Any], schema: Dict[str, Any]) -> Di
         logger.error(f"Error converting BAML data back to JSON Schema: {e}")
         logger.error(f"Returning original data without conversion")
         return baml_data
+
+
+# Add new function for TypeBuilder integration
+def json_schema_to_typebuilder_baml(schema: Dict[str, Any]) -> str:
+    """
+    Generate a BAML schema string for TypeBuilder with dynamic DynamicResult extension.
+    
+    This function builds on the existing converter to create a schema compatible with
+    TypeBuilder, including a dynamic extension of the DynamicResult class.
+    
+    Args:
+        schema: JSON Schema object
+        
+    Returns:
+        BAML schema string for use with TypeBuilder's add_baml() method
+    """
+    logger = logging.getLogger(__name__)
+    try:
+        # Log the input schema
+        logger.debug(f"Converting schema to TypeBuilder BAML: {json.dumps(schema, indent=2)}")
+        
+        # Check and enforce required fields
+        if "properties" in schema and "images" in schema.get("properties", {}):
+            # Ensure required fields in the schema
+            image_items = schema["properties"]["images"].get("items", {})
+            if "properties" in image_items and "required" in image_items:
+                # Make sure description is in required fields if it exists in properties
+                if "description" in image_items.get("properties", {}) and "description" not in image_items["required"]:
+                    logger.debug("Adding 'description' to required fields")
+                    image_items["required"].append("description")
+        
+        # First, convert schema to standard BAML using the existing converter
+        converter = Converter()
+        schema_baml = converter.json_schema_to_baml(schema, root_name="RootJSONSchema")
+        
+        # Log the generated BAML
+        logger.debug(f"Generated BAML schema:\n{schema_baml}")
+        
+        # Add dynamic extension of DynamicResult
+        dynamic_extension = """
+// Dynamic extension of DynamicResult
+dynamic class DynamicResult {
+    // Original properties are preserved
+    rootObj RootJSONSchema @description("Root schema object containing all extracted data")
+}
+"""
+        
+        # Create a custom helper for testing/debugging
+        test_helper = """
+// Test helper comment to verify the schema is being updated
+// Description field should be required in all image items
+"""
+        
+        # Combine standard BAML with dynamic extension
+        final_schema = f"{schema_baml}\n\n{dynamic_extension}\n\n{test_helper}"
+        logger.debug(f"Final TypeBuilder BAML schema:\n{final_schema}")
+        return final_schema
+    except Exception as e:
+        # Log error but don't crash - return a minimal valid BAML schema
+        logger.error(f"Error generating TypeBuilder BAML: {e}")
+        return """
+// Error generating schema - using fallback
+class RootJSONSchema {
+  value string? @description("Default value for schema generation error")
+}
+
+// Dynamic extension with fallback schema
+dynamic class DynamicResult {
+  rootObj RootJSONSchema @description("Fallback schema due to error")
+}
+"""

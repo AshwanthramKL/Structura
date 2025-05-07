@@ -18,8 +18,12 @@ from pydantic import BaseModel
 from src.pipeline.planner.planner import ExtractionPlan
 from src.pipeline.chunker.text_chunker import Chunk
 from src.schema_compiler.validator import SchemaValidator
-from src.schema_compiler.converter import baml_to_json_schema
+from src.schema_compiler.converter import baml_to_json_schema, json_schema_to_typebuilder_baml
 from src.baml_utils import generate_client, client_registry_service
+
+# Note: We dynamically import TypeBuilder and other BAML client modules using importlib.import_module().
+# This approach avoids linter errors and handles the case where the BAML client hasn't been generated yet.
+# The BAML client is generated at runtime by _ensure_client() before extraction.
 
 logger = logging.getLogger(__name__)
 
@@ -180,7 +184,7 @@ class Extractor:
     
     def _extract_from_text(self, client: Any, text: str, plan: ExtractionPlan) -> ExtractionResult:
         """
-        Extract from text content with retry capability.
+        Extract from text content with TypeBuilder integration.
         
         Args:
             client: Configured BAML client
@@ -203,19 +207,40 @@ class Extractor:
         
         for attempt in range(self.max_retries + 1):
             try:
-                # Call BAML client with the text input
-                result = client.extractor(
+                # Import and configure TypeBuilder dynamically using importlib
+                # This avoids linter errors and is consistent with our client import pattern
+                options = {}
+                try:
+                    # The TypeBuilder module will be available after _ensure_client() is called
+                    type_builder_module = importlib.import_module("src.baml_client.type_builder")
+                    tb = type_builder_module.TypeBuilder()
+                    
+                    # Generate BAML schema for TypeBuilder
+                    baml_schema = json_schema_to_typebuilder_baml(plan.schema_json)
+                    
+                    # Add the schema to TypeBuilder
+                    tb.add_baml(baml_schema)
+                    
+                    # Set baml_options for the client call
+                    options = {"tb": tb}
+                except (ImportError, AttributeError) as e:
+                    logger.warning(f"TypeBuilder not available, falling back to standard extraction: {str(e)}")
+                    
+                # Call BAML client with the text input and TypeBuilder if available
+                result = client.Extractor(
                     input=text,
                     schema=plan.schema_baml,
-                    is_image=False
+                    is_image=False,
+                    baml_options=options
                 )
                 
-                # Convert property names back to original schema format
-                data = baml_to_json_schema(self._parse_result(result), plan.schema_json)
-                
-                # TODO: Use SchemaValidator to validate the data against the schema
-                # validator = SchemaValidator(plan.schema_json)
-                # validator.validate(data)
+                # Parse result based on whether TypeBuilder was used
+                if hasattr(result, 'rootObj'):
+                    # TypeBuilder approach - access rootObj
+                    data = self._convert_to_dict(result.rootObj)
+                else:
+                    # Standard approach - parse result normally
+                    data = baml_to_json_schema(self._parse_result(result), plan.schema_json)
                 
                 # Get token usage from collector
                 tokens = self._get_token_usage()
@@ -240,7 +265,7 @@ class Extractor:
     
     def _extract_from_images(self, client: Any, images: List[Tuple[bytes, str]], plan: ExtractionPlan) -> ExtractionResult:
         """
-        Extract from image content.
+        Extract from image content with TypeBuilder integration.
         
         Args:
             client: Configured BAML client
@@ -282,15 +307,40 @@ class Extractor:
             )
         
         try:
-            # Call BAML client with the image inputs
-            result = client.extractor(
+            # Import and configure TypeBuilder dynamically using importlib
+            # This avoids linter errors and is consistent with our client import pattern
+            options = {}
+            try:
+                # The TypeBuilder module will be available after _ensure_client() is called
+                type_builder_module = importlib.import_module("src.baml_client.type_builder")
+                tb = type_builder_module.TypeBuilder()
+                
+                # Generate BAML schema for TypeBuilder
+                baml_schema = json_schema_to_typebuilder_baml(plan.schema_json)
+                
+                # Add the schema to TypeBuilder
+                tb.add_baml(baml_schema)
+                
+                # Set baml_options for the client call
+                options = {"tb": tb}
+            except (ImportError, AttributeError) as e:
+                logger.warning(f"TypeBuilder not available, falling back to standard extraction: {str(e)}")
+                
+            # Call BAML client with the image inputs and TypeBuilder if available
+            result = client.Extractor(
                 input=baml_images,
                 schema=plan.schema_baml,
-                is_image=True
+                is_image=True,
+                baml_options=options
             )
             
-            # Convert property names back to original schema format
-            data = baml_to_json_schema(self._parse_result(result), plan.schema_json)
+            # Parse result based on whether TypeBuilder was used
+            if hasattr(result, 'rootObj'):
+                # TypeBuilder approach - access rootObj
+                data = self._convert_to_dict(result.rootObj)
+            else:
+                # Standard approach - parse result normally
+                data = baml_to_json_schema(self._parse_result(result), plan.schema_json)
             
             # TODO: Use SchemaValidator to validate the data against the schema
             # validator = SchemaValidator(plan.schema_json)
@@ -390,3 +440,70 @@ class Extractor:
         except Exception as e:
             logger.error(f"Error ensuring BAML client availability: {str(e)}")
             return False
+
+    def _convert_to_dict(self, obj: Any) -> Any:
+        """
+        Convert TypeBuilder-generated object to dictionary.
+        
+        This method handles dynamic properties that may not be visible in vars().
+        
+        Args:
+            obj: TypeBuilder-generated object or any other object
+            
+        Returns:
+            Dictionary representation of the object, or the value itself for primitives
+        """
+        if obj is None:
+            return None
+        
+        # For primitive types, return as is
+        if isinstance(obj, (str, int, float, bool)):
+            return obj
+        
+        # For list types, convert each item
+        if isinstance(obj, list):
+            return [self._convert_to_dict(item) for item in obj]
+            
+        # For dict types, convert each value
+        if isinstance(obj, dict):
+            return {k: self._convert_to_dict(v) for k, v in obj.items()}
+        
+        # First try the simplest approach - check if it's already dict-like
+        try:
+            result = dict(obj)
+            return {k: self._convert_to_dict(v) for k, v in result.items()}
+        except (TypeError, ValueError):
+            # Not directly convertible to dict, continue with attribute approach
+            pass
+            
+        # For objects with __dict__, use attribute-based approach
+        result = {}
+        
+        try:
+            # Get all non-hidden, non-callable attributes
+            attrs = [attr for attr in dir(obj) 
+                    if not attr.startswith("_") and not callable(getattr(obj, attr))]
+            
+            # If no attributes found, try using __dict__
+            if not attrs and hasattr(obj, "__dict__"):
+                return {k: self._convert_to_dict(v) for k, v in vars(obj).items()}
+            
+            for attr in attrs:
+                try:
+                    value = getattr(obj, attr)
+                    result[attr] = self._convert_to_dict(value)
+                except Exception as e:
+                    logger.warning(f"Failed to get attribute {attr}: {str(e)}")
+                    
+            # If result is empty but object has string representation, use it
+            if not result:
+                return str(obj)
+                
+            return result
+        except Exception as e:
+            logger.warning(f"Failed to convert object to dict: {str(e)}")
+            # Fallback to vars() if dir() approach fails
+            if hasattr(obj, "__dict__"):
+                return {k: self._convert_to_dict(v) for k, v in vars(obj).items()}
+            # Last resort - convert to string
+            return str(obj)

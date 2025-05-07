@@ -76,7 +76,7 @@ class TestExtractor(unittest.TestCase):
         # Mock the extractor function result
         mock_result = MagicMock()
         mock_result.data = json.dumps({"data": "Extracted information"})
-        mock_client.extractor.return_value = mock_result
+        mock_client.Extractor.return_value = mock_result
         
         # Mock the collector logs
         mock_collector.logs = [MagicMock()]
@@ -91,7 +91,7 @@ class TestExtractor(unittest.TestCase):
         self.assertEqual(result, {"data": "Extracted information"})
         
         # Verify the client was called correctly
-        mock_client.extractor.assert_called_once_with(
+        mock_client.Extractor.assert_called_once_with(
             input=self.text_chunk.text,
             schema=self.mock_plan.schema_baml,
             is_image=False
@@ -115,7 +115,7 @@ class TestExtractor(unittest.TestCase):
         mock_import_module.return_value = mock_baml_client
         
         # Make the extractor function raise an exception
-        mock_client.extractor.side_effect = Exception("Extraction failed")
+        mock_client.Extractor.side_effect = Exception("Extraction failed")
         
         # Perform extraction (should return empty dict on failure)
         result = self.extractor.extract([self.text_chunk], self.mock_plan)
@@ -124,7 +124,7 @@ class TestExtractor(unittest.TestCase):
         self.assertEqual(result, {})
         
         # Verify the client was called
-        mock_client.extractor.assert_called_once()
+        mock_client.Extractor.assert_called_once()
     
     @patch('src.pipeline.extractor.extractor.importlib.import_module')
     @patch('src.baml_utils.client_registry_service.get_registry')
@@ -153,7 +153,7 @@ class TestExtractor(unittest.TestCase):
                 mock_result.data = json.dumps({"data": "Chunk 2 data"})
             return mock_result
         
-        mock_client.extractor.side_effect = side_effect
+        mock_client.Extractor.side_effect = side_effect
         
         # Create multiple chunks
         chunk1 = Chunk(
@@ -177,7 +177,7 @@ class TestExtractor(unittest.TestCase):
         self.assertEqual(result, {"data": "Chunk 1 data"})
         
         # Verify the client was called twice (once for each chunk)
-        self.assertEqual(mock_client.extractor.call_count, 2)
+        self.assertEqual(mock_client.Extractor.call_count, 2)
 
 
 if __name__ == "__main__":

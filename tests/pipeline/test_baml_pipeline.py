@@ -91,7 +91,7 @@ class TestBAMLPipeline(unittest.TestCase):
             "age": 45,
             "occupation": "software engineer"
         })
-        mock_client.extractor.return_value = mock_result
+        mock_client.Extractor.return_value = mock_result
         
         # Create a planner and generate a plan
         planner = Planner()
@@ -126,8 +126,8 @@ class TestBAMLPipeline(unittest.TestCase):
             "occupation": "software engineer"
         })
         
-        # Verify the client was called with the correct parameters
-        mock_client.extractor.assert_called_once()
+        # Verify the client was called
+        mock_client.Extractor.assert_called_once()
     
     @patch('src.baml_utils.client_generator.subprocess.run')
     def test_client_generator(self, mock_subprocess_run):

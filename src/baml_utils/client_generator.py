@@ -65,19 +65,31 @@ class BAMLClientGenerator:
             try:
                 logger.info(f"Generating BAML client (attempt {attempt+1}/{self.max_retries})...")
                 
+                # Build the command
+                cmd = ["baml-cli", "generate", "--from", str(self.src_dir)]
+                logger.info(f"Running command: {' '.join(cmd)}")
+                
                 # Run the BAML CLI generate command
                 result = subprocess.run(
-                    [
-                        "baml-cli", "generate",
-                        "--from", str(self.src_dir),
-                        "--output", str(self.output_dir)
-                    ],
+                    cmd,
                     capture_output=True,
                     text=True,
-                    check=True
+                    check=False  # Don't raise exception so we can log details
                 )
                 
-                logger.info(f"BAML client generated successfully: {result.stdout.strip()}")
+                # Log output and error
+                if result.stdout:
+                    logger.info(f"Command output: {result.stdout.strip()}")
+                if result.stderr:
+                    logger.error(f"Command error: {result.stderr.strip()}")
+                
+                # Check result
+                if result.returncode != 0:
+                    error_msg = f"BAML client generation failed with exit code {result.returncode}"
+                    logger.error(error_msg)
+                    raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
+                
+                logger.info(f"BAML client generated successfully")
                 
                 # Wait for files to be fully written
                 time.sleep(self.retry_delay)
