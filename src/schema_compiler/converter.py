@@ -71,6 +71,20 @@ BAML_RESERVED_KEYWORDS = {
     'test': 'test_case',
     'prompt': 'prompt_template',
     'client': 'client_name',
+    # Jinja templating keywords
+    'if': 'condition',
+    'for': 'loop',
+    'in': 'contained_in',
+    'with': 'input_params',
+    'extends': 'parent',
+    'include': 'included_content',
+    'block': 'content_block',
+    'macro': 'template_macro',
+    'set': 'variable_set',
+    'filter': 'content_filter',
+    'import': 'imported_content',
+    'from': 'import_source',
+    'as': 'alias',
 }
 
 # BAML built-in or reserved class/type names that should not be redefined
