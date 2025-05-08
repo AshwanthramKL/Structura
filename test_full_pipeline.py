@@ -109,7 +109,7 @@ def run_full_pipeline(schema_file: str, text_file: str, output_file: Optional[st
     
     # Step 4: Create extraction plan using Planner
     logger.info("Creating extraction plan...")
-    planner = Planner()
+    planner = Planner(enable_max_mode=True)
     
     # Convert JSON schema to BAML using schema compiler
     # Using json_schema_to_typebuilder_baml as the Extractor will use this for TypeBuilder
@@ -126,6 +126,11 @@ def run_full_pipeline(schema_file: str, text_file: str, output_file: Optional[st
     logger.info(f"Extraction plan created with model tier: {plan.model_tier}")
     logger.info(f"Total input tokens: {plan.total_input_tokens}, Expected output tokens: {plan.expected_output_tokens}")
     logger.info(f"Chunking needed: {plan.needs_chunking}")
+    
+    # Print the BAML schema string that will be used by the LLM
+    logger.info("--- BAML SCHEMA FOR LLM (plan.schema_baml) ---")
+    logger.info(plan.schema_baml)
+    logger.info("--------------------------------------------")
 
     # Step 5: Chunk the document using TextChunker if needed
     if plan.needs_chunking:

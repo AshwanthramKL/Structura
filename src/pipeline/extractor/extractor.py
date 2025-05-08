@@ -80,6 +80,7 @@ class Extractor:
         """
         # For a single chunk, just extract directly
         if len(chunks) == 1:
+            logger.info("Extracting from single chunk")
             result = self._extract_from_chunk(chunks[0], plan)
             if result.success:
                 return result.data
@@ -90,6 +91,7 @@ class Extractor:
         # For multiple chunks, extract from each and combine
         results = []
         errors = []
+        logger.info(f"Extracting from {len(chunks)} chunks")
         
         for i, chunk in enumerate(chunks):
             logger.info(f"Extracting from chunk {i+1}/{len(chunks)}")
@@ -165,7 +167,7 @@ class Extractor:
         # Handle different types of chunks
         try:
             if chunk.images:
-                    return self._extract_from_images(client, chunk.images, plan)
+                    return self._extract_from_images(client, chunk.images, plan, chunk)
             elif chunk.text:
                     return self._extract_from_text(client, chunk.text, plan)
             else:
@@ -232,25 +234,22 @@ class Extractor:
                 )
                 
                 # Parse result based on whether TypeBuilder was used
-                if hasattr(result, 'rootObj'):
+                if hasattr(result, 'rootObj') and result.rootObj is not None:
                     # TypeBuilder approach - access rootObj
+                    logger.debug("TypeBuilder approach - converting result.rootObj to dict")
                     data = self._convert_to_dict(result.rootObj)
-                else:
+                elif result is not None:
                     # Standard approach - parse result normally
-                    data = baml_to_json_schema(self._parse_result(result), plan.schema_json)
+                    logger.debug("Standard approach - converting result to dict")
+                    data = self._convert_to_dict(result)
+                else:
+                    logger.warning("BAML result and rootObj are None. Returning empty data.")
+                    data = {}
                 
-                # Validate extracted data internally
-                is_valid, validation_errors = SchemaValidator.validate(data, plan.schema_json, raise_exception=False)
-                if not is_valid:
-                    error_messages = [f"Error at '{err['path']}': {err['message']}" for err in validation_errors]
-                    full_error_msg = f"Schema validation failed for chunk {chunk.id}: {'; '.join(error_messages)}"
-                    logger.error(full_error_msg)
-                    return ExtractionResult(
-                        success=False,
-                        error=full_error_msg,
-                        data=data, # Return potentially invalid data for debugging
-                        tokens=self._get_token_usage() # Still log tokens
-                    )
+                # Backward conversion: BAML -> original JSON Schema property names
+                data = baml_to_json_schema(data, plan.schema_json)
+                # Normalize nulls to match expected schema types
+                data = self._normalize_nulls(data, plan.schema_json)
                 
                 # Get token usage from collector
                 tokens = self._get_token_usage()
@@ -328,7 +327,7 @@ class Extractor:
             logger.warning(f"TypeBuilder not available, falling back to standard extraction: {str(e)}")
             options = {}
         
-        # Call BAML client with the image inputs and TypeBuilder if available
+        # Call BAML client with image input and TypeBuilder
         result = client.Extractor(
             input=images_for_baml,
             schema=plan.schema_baml,
@@ -337,27 +336,22 @@ class Extractor:
         )
         
         # Parse result based on whether TypeBuilder was used
-        if hasattr(result, 'rootObj'):
+        if hasattr(result, 'rootObj') and result.rootObj is not None:
             # TypeBuilder approach - access rootObj
+            logger.debug("TypeBuilder approach for images - converting result.rootObj to dict")
             data = self._convert_to_dict(result.rootObj)
-        else:
+        elif result is not None:
             # Standard approach - parse result normally
-            data = baml_to_json_schema(self._parse_result(result), plan.schema_json)
+            logger.debug("Standard approach for images - converting result to dict")
+            data = self._convert_to_dict(result)
+        else:
+            logger.warning("BAML result and rootObj for images are None. Returning empty data.")
+            data = {}
         
-        # Validate extracted data internally
-        is_valid, validation_errors = SchemaValidator.validate(data, plan.schema_json, raise_exception=False)
-        if not is_valid:
-            error_messages = [f"Error at '{err['path']}': {err['message']}" for err in validation_errors]
-            image_identifier = "current_image_set"
-            full_error_msg = f"Schema validation failed for {image_identifier}: {'; '.join(error_messages)}"
-            logger.error(full_error_msg)
-            return ExtractionResult(
-                success=False,
-                error=full_error_msg,
-                data=data, # Return potentially invalid data
-                tokens=self._get_token_usage()
-            )
-
+        # Backward conversion and null normalization
+        data = baml_to_json_schema(data, plan.schema_json)
+        data = self._normalize_nulls(data, plan.schema_json)
+        
         # Get token usage from collector
         tokens = self._get_token_usage()
         
@@ -511,3 +505,15 @@ class Extractor:
                 return {k: self._convert_to_dict(v) for k, v in vars(obj).items()}
             # Last resort - convert to string
             return str(obj)
+
+    def _normalize_nulls(self, data: Any, schema: Dict[str, Any]) -> Any:
+        """Delegate to ``schema_compiler.repair.normalize``.
+
+        The full normalisation logic has been extracted to a shared helper
+        module (``src/schema_compiler/repair.py``) so it can be reused by the
+        future Merger and unit-tested in isolation.  This wrapper keeps the
+        original Extractor interface intact.
+        """
+        from src.schema_compiler import repair
+
+        return repair.normalize(data, schema)

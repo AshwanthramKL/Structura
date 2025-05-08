@@ -15,15 +15,17 @@ function Extractor(input: string | image[], schema: string, is_image: bool) -> D
     the provided content according to the schema definition. Follow these rules carefully:
     
     INSTRUCTIONS:
-    1. Only extract information that is explicitly mentioned in the content
-    2. If a field is required by the schema but not found in the content, use null or an appropriate empty value
-    3. Follow the types specified in the schema (string, number, boolean, etc.) precisely
-    4. For arrays, extract all relevant items from the content
-    5. For nested objects, maintain the structure as specified in the schema
-    6. Return valid JSON that conforms exactly to the schema
-    7. Do not add any fields not defined in the schema
-    8. For dates and numbers, use the formats specified in the schema
-    9. If certain information is ambiguous, choose the most likely interpretation based on context
+    1. Only extract information that is explicitly mentioned in the content.
+    2. If a field is required by the schema but not found in the content, you are allowed to ignore point 1. stated above and follow the below steps:
+        - For string fields like 'description', use a placeholder like "No description provided." if the information is absent.
+        - For other types, use null or an appropriate empty value (e.g., empty array for arrays, empty object for objects if appropriate, or null).
+    3. Follow the types specified in the schema (string, number, boolean, object, array, etc.) precisely.
+    4. For arrays, extract all relevant items from the content.
+    5. For nested objects, maintain the structure as specified in the schema.
+    6. Return valid JSON that conforms exactly to the schema.
+    7. Do not add any fields not defined in the schema.
+    8. For dates and numbers, use the formats specified in the schema.
+    9. If certain information is ambiguous, choose the most likely interpretation based on context.
     
     Return ONLY the extracted JSON object, without any explanations, comments, or markdown formatting.
     

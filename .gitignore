@@ -76,8 +76,6 @@ local_settings.py
 .windsurf/
 
 # Project specific
-experiments/
-data/
 temp_baml/
 explore_baml/
 baml_client/

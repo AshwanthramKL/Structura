@@ -114,6 +114,10 @@ class Converter:
         self._original_schema = None
         # Track classes that have been processed
         self._processed_classes = set()
+        # Track synthetic map-key containers generated from patternProperties
+        self._pattern_container_names: Set[str] = set()
+        # Global mapping of BAML enum values back to their original JSON Schema values
+        self._enum_reverse_map: Dict[str, Any] = {}
     
     def _clean_name(self, name: str) -> str:
         """Clean a name to be a valid BAML identifier."""
@@ -304,14 +308,6 @@ class Converter:
             schema, name + "Value", definitions
         )
         
-        # For complex types that aren't directly supported in map values,
-        # convert to appropriate simple types
-        if value_type not in ["string", "int", "float", "bool"] and not value_type.startswith("map<"):
-            if schema.get("type") == "object":
-                value_type = "map<string, string>"
-            else:
-                value_type = "string"
-                
         return value_type, value_classes
     
     def _convert_pattern_properties(self, 
@@ -338,6 +334,9 @@ class Converter:
             # Generate a clean property name from the pattern
             prop_name = self._pattern_to_property_name(pattern)
             
+            # Record that this is a synthetic container we may need to remove later
+            self._pattern_container_names.add(prop_name)
+            
             # Determine the value type for this pattern
             value_type, value_classes = self._get_map_value_type(
                 pattern_schema, prop_name, definitions
@@ -361,6 +360,8 @@ class Converter:
         self._class_name_mappings = {}
         self._renamed_types = {}
         self._processed_classes = set()
+        self._pattern_container_names = set()
+        self._enum_reverse_map = {}
         
         try:
             definitions = schema.get("definitions", {})
@@ -411,16 +412,22 @@ class Converter:
         if isinstance(obj, dict):
             result = {}
             for key, value in obj.items():
-                # Convert the key back to the original JSON Schema name
+                # If this key is one of our synthetic patternProperties containers, hoist its contents
+                if key in self._pattern_container_names and isinstance(value, dict):
+                    for inner_k, inner_v in value.items():
+                        result[inner_k] = self._convert_object_keys(inner_v)
+                    continue  # Skip adding the container field itself
+                
                 original_key = self._reverse_property_name(key)
-                # Recursively process any nested objects
                 result[original_key] = self._convert_object_keys(value)
             return result
         elif isinstance(obj, list):
             # Process each item in the list
             return [self._convert_object_keys(item) for item in obj]
         else:
-            # Return primitive values as-is
+            # Primitive – try enum reversal first
+            if isinstance(obj, str) and obj in self._enum_reverse_map:
+                return self._enum_reverse_map[obj]
             return obj
     
     def _get_baml_type_for_property(self, 
@@ -472,6 +479,11 @@ class Converter:
                     formatted_value = self._format_enum_value(value)
                     enum_def += f"  {formatted_value}\n"
                 
+                # Record reverse mapping for enum values so we can map them back later
+                for orig_val in schema["enum"]:
+                    formatted_val = self._format_enum_value(orig_val)
+                    self._enum_reverse_map[formatted_val] = orig_val
+                
                 enum_def += "}\n"
                 additional_classes.append(enum_def)
                 return enum_name, additional_classes
@@ -509,20 +521,17 @@ class Converter:
             
             # Handle objects (convert to classes)
             elif schema_type == "object":
-                if "properties" in schema:
-                    class_name = self._sanitize_class_name(property_name)
-                    
-                    if class_name not in self._processed_classes:
-                        self._processed_classes.add(class_name)
-                        class_def, more_classes = self._schema_to_baml_class(
-                            schema, class_name, definitions
-                        )
-                        additional_classes.append(class_def)
-                        additional_classes.extend(more_classes)
-                    
-                    return class_name, additional_classes
-                else:
-                    return "map<string, string>", additional_classes
+                class_name = self._sanitize_class_name(property_name)
+                
+                if class_name not in self._processed_classes:
+                    self._processed_classes.add(class_name)
+                    class_def, more_classes = self._schema_to_baml_class(
+                        schema, class_name, definitions
+                    )
+                    additional_classes.append(class_def)
+                    additional_classes.extend(more_classes)
+                
+                return class_name, additional_classes
             
             # Handle primitive types
             elif schema_type == "string":
@@ -604,10 +613,9 @@ class Converter:
             
             # Instead of @min and @max attributes, include constraints in the description
             if prop_schema.get("type") in ["number", "integer"]:
-                if "minimum" in prop_schema:
-                    if description:
-                        description += " "
-                    description += f"Min: {prop_schema['minimum']}."
+                if description:
+                    description += " "
+                description += f"Min: {prop_schema['minimum']}."
                 if "maximum" in prop_schema:
                     if description:
                         description += " "
